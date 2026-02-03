@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { NumberGuessService } from './numberGuessService';
 import { requestCache, createCacheKey } from '@/utils/requestCache';
 import { useWallet } from '@/hooks/useWallet';
@@ -83,10 +83,23 @@ export function NumberGuessGame({
 
   const POINTS_DECIMALS = 7;
   const isBusy = loading || quickstartLoading;
+  const actionLock = useRef(false);
   const quickstartAvailable = walletType === 'dev'
     && DevWalletService.isDevModeAvailable()
     && DevWalletService.isPlayerAvailable(1)
     && DevWalletService.isPlayerAvailable(2);
+
+  const runAction = async (action: () => Promise<void>) => {
+    if (actionLock.current || isBusy) {
+      return;
+    }
+    actionLock.current = true;
+    try {
+      await action();
+    } finally {
+      actionLock.current = false;
+    }
+  };
 
   const parsePoints = (value: string): bigint | null => {
     try {
@@ -103,12 +116,8 @@ export function NumberGuessGame({
 
   const loadGameState = async () => {
     try {
-      // Use short TTL (5s) since game state can change frequently, but still dedupe rapid calls
-      const game = await requestCache.dedupe(
-        createCacheKey('game-state', sessionId),
-        () => numberGuessService.getGame(sessionId),
-        5000 // 5 second TTL for game state
-      );
+      // Always fetch latest game state to avoid stale cached results after transactions.
+      const game = await numberGuessService.getGame(sessionId);
       setGameState(game);
 
       // Determine game phase based on state

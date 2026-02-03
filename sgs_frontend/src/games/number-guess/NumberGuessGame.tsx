@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { NumberGuessService } from './numberGuessService';
 import { requestCache, createCacheKey } from '@/utils/requestCache';
 import { useWallet } from '@/hooks/useWallet';
@@ -83,10 +83,23 @@ export function NumberGuessGame({
 
   const POINTS_DECIMALS = 7;
   const isBusy = loading || quickstartLoading;
+  const actionLock = useRef(false);
   const quickstartAvailable = walletType === 'dev'
     && DevWalletService.isDevModeAvailable()
     && DevWalletService.isPlayerAvailable(1)
     && DevWalletService.isPlayerAvailable(2);
+
+  const runAction = async (action: () => Promise<void>) => {
+    if (actionLock.current || isBusy) {
+      return;
+    }
+    actionLock.current = true;
+    try {
+      await action();
+    } finally {
+      actionLock.current = false;
+    }
+  };
 
   const parsePoints = (value: string): bigint | null => {
     try {
@@ -103,12 +116,8 @@ export function NumberGuessGame({
 
   const loadGameState = async () => {
     try {
-      // Use short TTL (5s) since game state can change frequently, but still dedupe rapid calls
-      const game = await requestCache.dedupe(
-        createCacheKey('game-state', sessionId),
-        () => numberGuessService.getGame(sessionId),
-        5000 // 5 second TTL for game state
-      );
+      // Always fetch latest game state to avoid stale cached results after transactions.
+      const game = await numberGuessService.getGame(sessionId);
       setGameState(game);
 
       // Determine game phase based on state
@@ -338,369 +347,373 @@ export function NumberGuessGame({
   }, [importAuthEntryXDR, createMode, userAddress]);
 
   const handlePrepareTransaction = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        const p1Points = parsePoints(player1Points);
 
-      const p1Points = parsePoints(player1Points);
+        if (!p1Points || p1Points <= 0n) {
+          throw new Error('Enter a valid points amount');
+        }
 
-      if (!p1Points || p1Points <= 0n) {
-        throw new Error('Enter a valid points amount');
-      }
+        const signer = getContractSigner();
 
-      const signer = getContractSigner();
+        // Use placeholder values for Player 2 (they'll rebuild with their own values).
+        // We still need a real, funded account as the transaction source for build/simulation.
+        const placeholderPlayer2Address = await getFundedSimulationSourceAddress([player1Address, userAddress]);
+        const placeholderP2Points = p1Points; // Same as P1 for simulation
 
-      // Use placeholder values for Player 2 (they'll rebuild with their own values).
-      // We still need a real, funded account as the transaction source for build/simulation.
-      const placeholderPlayer2Address = await getFundedSimulationSourceAddress([player1Address, userAddress]);
-      const placeholderP2Points = p1Points; // Same as P1 for simulation
+        console.log('Preparing transaction for Player 1 to sign...');
+        console.log('Using placeholder Player 2 values for simulation only');
+        const authEntryXDR = await numberGuessService.prepareStartGame(
+          sessionId,
+          player1Address,
+          placeholderPlayer2Address,
+          p1Points,
+          placeholderP2Points,
+          signer
+        );
 
-      console.log('Preparing transaction for Player 1 to sign...');
-      console.log('Using placeholder Player 2 values for simulation only');
-      const authEntryXDR = await numberGuessService.prepareStartGame(
-        sessionId,
-        player1Address,
-        placeholderPlayer2Address,
-        p1Points,
-        placeholderP2Points,
-        signer
-      );
+        console.log('Transaction prepared successfully! Player 1 has signed their auth entry.');
+        setExportedAuthEntryXDR(authEntryXDR);
+        setSuccess('Auth entry signed! Copy the auth entry XDR or share URL below and send it to Player 2. Waiting for them to sign...');
 
-      console.log('Transaction prepared successfully! Player 1 has signed their auth entry.');
-      setExportedAuthEntryXDR(authEntryXDR);
-      setSuccess('Auth entry signed! Copy the auth entry XDR or share URL below and send it to Player 2. Waiting for them to sign...');
+        // Start polling for the game to be created by Player 2
+        const pollInterval = setInterval(async () => {
+          try {
+            // Try to load the game
+            const game = await numberGuessService.getGame(sessionId);
+            if (game) {
+              console.log('Game found! Player 2 has finalized the transaction. Transitioning to guess phase...');
+              clearInterval(pollInterval);
 
-      // Start polling for the game to be created by Player 2
-      const pollInterval = setInterval(async () => {
-        try {
-          // Try to load the game
-          const game = await numberGuessService.getGame(sessionId);
-          if (game) {
-            console.log('Game found! Player 2 has finalized the transaction. Transitioning to guess phase...');
-            clearInterval(pollInterval);
+              // Update game state
+              setGameState(game);
+              setExportedAuthEntryXDR(null);
+              setSuccess('Game created! Player 2 has signed and submitted.');
+              setGamePhase('guess');
 
-            // Update game state
-            setGameState(game);
-            setExportedAuthEntryXDR(null);
-            setSuccess('Game created! Player 2 has signed and submitted.');
-            setGamePhase('guess');
+              // Refresh dashboard to show updated available points (locked in game)
+              onStandingsRefresh();
 
-            // Refresh dashboard to show updated available points (locked in game)
-            onStandingsRefresh();
-
-            // Clear success message after 2 seconds
-            setTimeout(() => setSuccess(null), 2000);
-          } else {
-            console.log('Game not found yet, continuing to poll...');
+              // Clear success message after 2 seconds
+              setTimeout(() => setSuccess(null), 2000);
+            } else {
+              console.log('Game not found yet, continuing to poll...');
+            }
+          } catch (err) {
+            // Game doesn't exist yet, keep polling
+            console.log('Polling for game creation...', err instanceof Error ? err.message : 'checking');
           }
-        } catch (err) {
-          // Game doesn't exist yet, keep polling
-          console.log('Polling for game creation...', err instanceof Error ? err.message : 'checking');
-        }
-      }, 3000); // Poll every 3 seconds
+        }, 3000); // Poll every 3 seconds
 
-      // Stop polling after 5 minutes
-      setTimeout(() => {
-        clearInterval(pollInterval);
-        console.log('Stopped polling after 5 minutes');
-      }, 300000);
-    } catch (err) {
-      console.error('Prepare transaction error:', err);
-      // Extract detailed error message
-      let errorMessage = 'Failed to prepare transaction';
-      if (err instanceof Error) {
-        errorMessage = err.message;
+        // Stop polling after 5 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          console.log('Stopped polling after 5 minutes');
+        }, 300000);
+      } catch (err) {
+        console.error('Prepare transaction error:', err);
+        // Extract detailed error message
+        let errorMessage = 'Failed to prepare transaction';
+        if (err instanceof Error) {
+          errorMessage = err.message;
 
-        // Check for common errors
-        if (err.message.includes('insufficient')) {
-          errorMessage = `Insufficient points: ${err.message}. Make sure you have enough points for this game.`;
-        } else if (err.message.includes('auth')) {
-          errorMessage = `Authorization failed: ${err.message}. Check your wallet connection.`;
+          // Check for common errors
+          if (err.message.includes('insufficient')) {
+            errorMessage = `Insufficient points: ${err.message}. Make sure you have enough points for this game.`;
+          } else if (err.message.includes('auth')) {
+            errorMessage = `Authorization failed: ${err.message}. Check your wallet connection.`;
+          }
         }
+
+        setError(errorMessage);
+
+        // Keep the component in 'create' phase so user can see the error and retry
+      } finally {
+        setLoading(false);
       }
-
-      setError(errorMessage);
-
-      // Keep the component in 'create' phase so user can see the error and retry
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const handleQuickStart = async () => {
-    try {
-      setQuickstartLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      if (walletType !== 'dev') {
-        throw new Error('Quickstart only works with dev wallets in the Games Library.');
-      }
-
-      if (!DevWalletService.isDevModeAvailable() || !DevWalletService.isPlayerAvailable(1) || !DevWalletService.isPlayerAvailable(2)) {
-        throw new Error('Quickstart requires both dev wallets. Run "bun run setup" and connect a dev wallet.');
-      }
-
-      const p1Points = parsePoints(player1Points);
-      if (!p1Points || p1Points <= 0n) {
-        throw new Error('Enter a valid points amount');
-      }
-
-      const originalPlayer = devWalletService.getCurrentPlayer();
-      let player1AddressQuickstart = '';
-      let player2AddressQuickstart = '';
-      let player1Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
-      let player2Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
-
+    await runAction(async () => {
       try {
-        await devWalletService.initPlayer(1);
-        player1AddressQuickstart = devWalletService.getPublicKey();
-        player1Signer = devWalletService.getSigner();
-
-        await devWalletService.initPlayer(2);
-        player2AddressQuickstart = devWalletService.getPublicKey();
-        player2Signer = devWalletService.getSigner();
-      } finally {
-        if (originalPlayer) {
-          await devWalletService.initPlayer(originalPlayer);
+        setQuickstartLoading(true);
+        setError(null);
+        setSuccess(null);
+        if (walletType !== 'dev') {
+          throw new Error('Quickstart only works with dev wallets in the Games Library.');
         }
-      }
 
-      if (!player1Signer || !player2Signer) {
-        throw new Error('Quickstart failed to initialize dev wallet signers.');
-      }
+        if (!DevWalletService.isDevModeAvailable() || !DevWalletService.isPlayerAvailable(1) || !DevWalletService.isPlayerAvailable(2)) {
+          throw new Error('Quickstart requires both dev wallets. Run "bun run setup" and connect a dev wallet.');
+        }
 
-      if (player1AddressQuickstart === player2AddressQuickstart) {
-        throw new Error('Quickstart requires two different dev wallets.');
-      }
+        const p1Points = parsePoints(player1Points);
+        if (!p1Points || p1Points <= 0n) {
+          throw new Error('Enter a valid points amount');
+        }
 
-      const quickstartSessionId = createRandomSessionId();
-      setSessionId(quickstartSessionId);
-      setPlayer1Address(player1AddressQuickstart);
-      setCreateMode('create');
-      setExportedAuthEntryXDR(null);
-      setImportAuthEntryXDR('');
-      setImportSessionId('');
-      setImportPlayer1('');
-      setImportPlayer1Points('');
-      setImportPlayer2Points(DEFAULT_POINTS);
-      setLoadSessionId('');
+        const originalPlayer = devWalletService.getCurrentPlayer();
+        let player1AddressQuickstart = '';
+        let player2AddressQuickstart = '';
+        let player1Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
+        let player2Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
 
-      const placeholderPlayer2Address = await getFundedSimulationSourceAddress([
-        player1AddressQuickstart,
-        player2AddressQuickstart,
-      ]);
+        try {
+          await devWalletService.initPlayer(1);
+          player1AddressQuickstart = devWalletService.getPublicKey();
+          player1Signer = devWalletService.getSigner();
 
-      const authEntryXDR = await numberGuessService.prepareStartGame(
-        quickstartSessionId,
-        player1AddressQuickstart,
-        placeholderPlayer2Address,
-        p1Points,
-        p1Points,
-        player1Signer
-      );
+          await devWalletService.initPlayer(2);
+          player2AddressQuickstart = devWalletService.getPublicKey();
+          player2Signer = devWalletService.getSigner();
+        } finally {
+          if (originalPlayer) {
+            await devWalletService.initPlayer(originalPlayer);
+          }
+        }
 
-      const fullySignedTxXDR = await numberGuessService.importAndSignAuthEntry(
-        authEntryXDR,
-        player2AddressQuickstart,
-        p1Points,
-        player2Signer
-      );
+        if (!player1Signer || !player2Signer) {
+          throw new Error('Quickstart failed to initialize dev wallet signers.');
+        }
 
-      await numberGuessService.finalizeStartGame(
-        fullySignedTxXDR,
-        player2AddressQuickstart,
-        player2Signer
-      );
+        if (player1AddressQuickstart === player2AddressQuickstart) {
+          throw new Error('Quickstart requires two different dev wallets.');
+        }
 
-      try {
-        const game = await numberGuessService.getGame(quickstartSessionId);
-        setGameState(game);
+        const quickstartSessionId = createRandomSessionId();
+        setSessionId(quickstartSessionId);
+        setPlayer1Address(player1AddressQuickstart);
+        setCreateMode('create');
+        setExportedAuthEntryXDR(null);
+        setImportAuthEntryXDR('');
+        setImportSessionId('');
+        setImportPlayer1('');
+        setImportPlayer1Points('');
+        setImportPlayer2Points(DEFAULT_POINTS);
+        setLoadSessionId('');
+
+        const placeholderPlayer2Address = await getFundedSimulationSourceAddress([
+          player1AddressQuickstart,
+          player2AddressQuickstart,
+        ]);
+
+        const authEntryXDR = await numberGuessService.prepareStartGame(
+          quickstartSessionId,
+          player1AddressQuickstart,
+          placeholderPlayer2Address,
+          p1Points,
+          p1Points,
+          player1Signer
+        );
+
+        const fullySignedTxXDR = await numberGuessService.importAndSignAuthEntry(
+          authEntryXDR,
+          player2AddressQuickstart,
+          p1Points,
+          player2Signer
+        );
+
+        await numberGuessService.finalizeStartGame(
+          fullySignedTxXDR,
+          player2AddressQuickstart,
+          player2Signer
+        );
+
+        try {
+          const game = await numberGuessService.getGame(quickstartSessionId);
+          setGameState(game);
+        } catch (err) {
+          console.log('Quickstart game not available yet:', err);
+        }
+        setGamePhase('guess');
+        onStandingsRefresh();
+        setSuccess('Quickstart complete! Both players signed and the game is ready.');
+        setTimeout(() => setSuccess(null), 2000);
       } catch (err) {
-        console.log('Quickstart game not available yet:', err);
+        console.error('Quickstart error:', err);
+        setError(err instanceof Error ? err.message : 'Quickstart failed');
+      } finally {
+        setQuickstartLoading(false);
       }
-      setGamePhase('guess');
-      onStandingsRefresh();
-      setSuccess('Quickstart complete! Both players signed and the game is ready.');
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      console.error('Quickstart error:', err);
-      setError(err instanceof Error ? err.message : 'Quickstart failed');
-    } finally {
-      setQuickstartLoading(false);
-    }
+    });
   };
 
   const handleImportTransaction = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      // Validate required inputs (only auth entry and player 2 points)
-      if (!importAuthEntryXDR.trim()) {
-        throw new Error('Enter auth entry XDR from Player 1');
-      }
-      if (!importPlayer2Points.trim()) {
-        throw new Error('Enter your points amount (Player 2)');
-      }
-
-      // Parse Player 2's points
-      const p2Points = parsePoints(importPlayer2Points);
-      if (!p2Points || p2Points <= 0n) {
-        throw new Error('Invalid Player 2 points');
-      }
-
-      // Parse auth entry to extract game parameters
-      // The auth entry contains: session_id, player1, player1_points
-      console.log('Parsing auth entry to extract game parameters...');
-      const gameParams = numberGuessService.parseAuthEntry(importAuthEntryXDR.trim());
-
-      console.log('Extracted from auth entry:', {
-        sessionId: gameParams.sessionId,
-        player1: gameParams.player1,
-        player1Points: gameParams.player1Points.toString(),
-      });
-
-      // Auto-populate read-only fields from parsed auth entry (for display)
-      setImportSessionId(gameParams.sessionId.toString());
-      setImportPlayer1(gameParams.player1);
-      setImportPlayer1Points((Number(gameParams.player1Points) / 10_000_000).toString());
-
-      // Verify the user is Player 2 (prevent self-play)
-      if (gameParams.player1 === userAddress) {
-        throw new Error('Invalid game: You cannot play against yourself (you are Player 1 in this auth entry)');
-      }
-
-      // Additional validation: Ensure Player 2 address is different from Player 1
-      // (In case user manually edits the Player 2 field)
-      if (userAddress === gameParams.player1) {
-        throw new Error('Cannot play against yourself. Player 2 must be different from Player 1.');
-      }
-
-      const signer = getContractSigner();
-
-      // Step 1: Import Player 1's signed auth entry and rebuild transaction
-      // New simplified API - only needs: auth entry, player 2 address, player 2 points
-      console.log('Importing Player 1 auth entry and rebuilding transaction...');
-      const fullySignedTxXDR = await numberGuessService.importAndSignAuthEntry(
-        importAuthEntryXDR.trim(),
-        userAddress, // Player 2 address (current user)
-        p2Points,
-        signer
-      );
-
-      // Step 2: Player 2 finalizes and submits (they are the transaction source)
-      console.log('Simulating and submitting transaction...');
-      await numberGuessService.finalizeStartGame(
-        fullySignedTxXDR,
-        userAddress,
-        signer
-      );
-
-      // If we get here, transaction succeeded! Now update state.
-      console.log('Transaction submitted successfully! Updating state...');
-      setSessionId(gameParams.sessionId);
-      setSuccess('Game created successfully! Both players signed.');
-      setGamePhase('guess');
-
-      // Clear import fields
-      setImportAuthEntryXDR('');
-      setImportSessionId('');
-      setImportPlayer1('');
-      setImportPlayer1Points('');
-      setImportPlayer2Points(DEFAULT_POINTS);
-
-      // Load the newly created game state
-      await loadGameState();
-
-      // Refresh dashboard to show updated available points (locked in game)
-      onStandingsRefresh();
-
-      // Clear success message after 2 seconds
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      console.error('Import transaction error:', err);
-      // Extract detailed error message if available
-      let errorMessage = 'Failed to import and sign transaction';
-      if (err instanceof Error) {
-        errorMessage = err.message;
-
-        // Check for common Soroban errors
-        if (err.message.includes('simulation failed')) {
-          errorMessage = `Simulation failed: ${err.message}. Check that you have enough Points and the game parameters are correct.`;
-        } else if (err.message.includes('transaction failed')) {
-          errorMessage = `Transaction failed: ${err.message}. The game could not be created on the blockchain.`;
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        // Validate required inputs (only auth entry and player 2 points)
+        if (!importAuthEntryXDR.trim()) {
+          throw new Error('Enter auth entry XDR from Player 1');
         }
+        if (!importPlayer2Points.trim()) {
+          throw new Error('Enter your points amount (Player 2)');
+        }
+
+        // Parse Player 2's points
+        const p2Points = parsePoints(importPlayer2Points);
+        if (!p2Points || p2Points <= 0n) {
+          throw new Error('Invalid Player 2 points');
+        }
+
+        // Parse auth entry to extract game parameters
+        // The auth entry contains: session_id, player1, player1_points
+        console.log('Parsing auth entry to extract game parameters...');
+        const gameParams = numberGuessService.parseAuthEntry(importAuthEntryXDR.trim());
+
+        console.log('Extracted from auth entry:', {
+          sessionId: gameParams.sessionId,
+          player1: gameParams.player1,
+          player1Points: gameParams.player1Points.toString(),
+        });
+
+        // Auto-populate read-only fields from parsed auth entry (for display)
+        setImportSessionId(gameParams.sessionId.toString());
+        setImportPlayer1(gameParams.player1);
+        setImportPlayer1Points((Number(gameParams.player1Points) / 10_000_000).toString());
+
+        // Verify the user is Player 2 (prevent self-play)
+        if (gameParams.player1 === userAddress) {
+          throw new Error('Invalid game: You cannot play against yourself (you are Player 1 in this auth entry)');
+        }
+
+        // Additional validation: Ensure Player 2 address is different from Player 1
+        // (In case user manually edits the Player 2 field)
+        if (userAddress === gameParams.player1) {
+          throw new Error('Cannot play against yourself. Player 2 must be different from Player 1.');
+        }
+
+        const signer = getContractSigner();
+
+        // Step 1: Import Player 1's signed auth entry and rebuild transaction
+        // New simplified API - only needs: auth entry, player 2 address, player 2 points
+        console.log('Importing Player 1 auth entry and rebuilding transaction...');
+        const fullySignedTxXDR = await numberGuessService.importAndSignAuthEntry(
+          importAuthEntryXDR.trim(),
+          userAddress, // Player 2 address (current user)
+          p2Points,
+          signer
+        );
+
+        // Step 2: Player 2 finalizes and submits (they are the transaction source)
+        console.log('Simulating and submitting transaction...');
+        await numberGuessService.finalizeStartGame(
+          fullySignedTxXDR,
+          userAddress,
+          signer
+        );
+
+        // If we get here, transaction succeeded! Now update state.
+        console.log('Transaction submitted successfully! Updating state...');
+        setSessionId(gameParams.sessionId);
+        setSuccess('Game created successfully! Both players signed.');
+        setGamePhase('guess');
+
+        // Clear import fields
+        setImportAuthEntryXDR('');
+        setImportSessionId('');
+        setImportPlayer1('');
+        setImportPlayer1Points('');
+        setImportPlayer2Points(DEFAULT_POINTS);
+
+        // Load the newly created game state
+        await loadGameState();
+
+        // Refresh dashboard to show updated available points (locked in game)
+        onStandingsRefresh();
+
+        // Clear success message after 2 seconds
+        setTimeout(() => setSuccess(null), 2000);
+      } catch (err) {
+        console.error('Import transaction error:', err);
+        // Extract detailed error message if available
+        let errorMessage = 'Failed to import and sign transaction';
+        if (err instanceof Error) {
+          errorMessage = err.message;
+
+          // Check for common Soroban errors
+          if (err.message.includes('simulation failed')) {
+            errorMessage = `Simulation failed: ${err.message}. Check that you have enough Points and the game parameters are correct.`;
+          } else if (err.message.includes('transaction failed')) {
+            errorMessage = `Transaction failed: ${err.message}. The game could not be created on the blockchain.`;
+          }
+        }
+
+        setError(errorMessage);
+
+        // Keep the component in 'create' phase so user can see the error and retry
+        // Don't change gamePhase or clear any fields - let the user see what went wrong
+      } finally {
+        setLoading(false);
       }
-
-      setError(errorMessage);
-
-      // Keep the component in 'create' phase so user can see the error and retry
-      // Don't change gamePhase or clear any fields - let the user see what went wrong
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const handleLoadExistingGame = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        const parsedSessionId = parseInt(loadSessionId.trim());
+        if (isNaN(parsedSessionId) || parsedSessionId <= 0) {
+          throw new Error('Enter a valid session ID');
+        }
 
-      const parsedSessionId = parseInt(loadSessionId.trim());
-      if (isNaN(parsedSessionId) || parsedSessionId <= 0) {
-        throw new Error('Enter a valid session ID');
+        // Try to load the game (use cache to prevent duplicate calls)
+        const game = await requestCache.dedupe(
+          createCacheKey('game-state', parsedSessionId),
+          () => numberGuessService.getGame(parsedSessionId),
+          5000
+        );
+
+        // Verify game exists and user is one of the players
+        if (!game) {
+          throw new Error('Game not found');
+        }
+
+        if (game.player1 !== userAddress && game.player2 !== userAddress) {
+          throw new Error('You are not a player in this game');
+        }
+
+        // Load successful - update session ID and transition to game
+        setSessionId(parsedSessionId);
+        setGameState(game);
+        setLoadSessionId('');
+
+        // Determine game phase based on game state
+        if (game.winner !== null && game.winner !== undefined) {
+          // Game is complete - show reveal phase with winner
+          setGamePhase('reveal');
+          const isWinner = game.winner === userAddress;
+          setSuccess(isWinner ? '🎉 You won this game!' : 'Game complete. Winner revealed.');
+        } else if (game.player1_guess !== null && game.player1_guess !== undefined &&
+            game.player2_guess !== null && game.player2_guess !== undefined) {
+          // Both players guessed, waiting for reveal
+          setGamePhase('reveal');
+          setSuccess('Game loaded! Both players have guessed. You can reveal the winner.');
+        } else {
+          // Still in guessing phase
+          setGamePhase('guess');
+          setSuccess('Game loaded! Make your guess.');
+        }
+
+        // Clear success message after 2 seconds
+        setTimeout(() => setSuccess(null), 2000);
+      } catch (err) {
+        console.error('Load game error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load game');
+      } finally {
+        setLoading(false);
       }
-
-      // Try to load the game (use cache to prevent duplicate calls)
-      const game = await requestCache.dedupe(
-        createCacheKey('game-state', parsedSessionId),
-        () => numberGuessService.getGame(parsedSessionId),
-        5000
-      );
-
-      // Verify game exists and user is one of the players
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (game.player1 !== userAddress && game.player2 !== userAddress) {
-        throw new Error('You are not a player in this game');
-      }
-
-      // Load successful - update session ID and transition to game
-      setSessionId(parsedSessionId);
-      setGameState(game);
-      setLoadSessionId('');
-
-      // Determine game phase based on game state
-      if (game.winner !== null && game.winner !== undefined) {
-        // Game is complete - show reveal phase with winner
-        setGamePhase('reveal');
-        const isWinner = game.winner === userAddress;
-        setSuccess(isWinner ? '🎉 You won this game!' : 'Game complete. Winner revealed.');
-      } else if (game.player1_guess !== null && game.player1_guess !== undefined &&
-          game.player2_guess !== null && game.player2_guess !== undefined) {
-        // Both players guessed, waiting for reveal
-        setGamePhase('reveal');
-        setSuccess('Game loaded! Both players have guessed. You can reveal the winner.');
-      } else {
-        // Still in guessing phase
-        setGamePhase('guess');
-        setSuccess('Game loaded! Make your guess.');
-      }
-
-      // Clear success message after 2 seconds
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      console.error('Load game error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load game');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const copyAuthEntryToClipboard = async () => {
@@ -757,52 +770,67 @@ export function NumberGuessGame({
       return;
     }
 
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      const signer = getContractSigner();
-      await numberGuessService.makeGuess(sessionId, userAddress, guess, signer);
+        const signer = getContractSigner();
+        await numberGuessService.makeGuess(sessionId, userAddress, guess, signer);
 
-      setSuccess(`Guess submitted: ${guess}`);
-      await loadGameState();
-    } catch (err) {
-      console.error('Make guess error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to make guess');
-    } finally {
-      setLoading(false);
+        setSuccess(`Guess submitted: ${guess}`);
+        await loadGameState();
+      } catch (err) {
+        console.error('Make guess error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to make guess');
+      } finally {
+        setLoading(false);
+      }
+    });
+  };
+
+  const waitForWinner = async () => {
+    let updatedGame = await numberGuessService.getGame(sessionId);
+    let attempts = 0;
+    while (attempts < 5 && (!updatedGame || updatedGame.winner === null || updatedGame.winner === undefined)) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      updatedGame = await numberGuessService.getGame(sessionId);
+      attempts += 1;
     }
+    return updatedGame;
   };
 
   const handleRevealWinner = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      const signer = getContractSigner();
-      await numberGuessService.revealWinner(sessionId, userAddress, signer);
+        const signer = getContractSigner();
+        await numberGuessService.revealWinner(sessionId, userAddress, signer);
 
-      // Fetch updated on-chain state and derive the winner from it (avoid type mismatches from tx result decoding).
-      const updatedGame = await numberGuessService.getGame(sessionId);
-      setGameState(updatedGame);
-      setGamePhase('complete');
+        // Fetch updated on-chain state and derive the winner from it (avoid type mismatches from tx result decoding).
+        const updatedGame = await waitForWinner();
+        setGameState(updatedGame);
+        setGamePhase('complete');
 
-      const isWinner = updatedGame?.winner === userAddress;
-      setSuccess(isWinner ? '🎉 You won!' : 'Game complete! Winner revealed.');
+        const isWinner = updatedGame?.winner === userAddress;
+        setSuccess(isWinner ? '🎉 You won!' : 'Game complete! Winner revealed.');
 
-      // Refresh standings immediately (without navigating away)
-      onStandingsRefresh();
+        // Refresh standings immediately (without navigating away)
+        onStandingsRefresh();
 
-      // DON'T call onGameComplete() immediately - let user see the results
-      // User can click "Back to Games" button when ready
-    } catch (err) {
-      console.error('Reveal winner error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to reveal winner');
-    } finally {
-      setLoading(false);
-    }
+        // DON'T call onGameComplete() immediately - let user see the results
+        // User can click "Back to Games" button when ready
+      } catch (err) {
+        console.error('Reveal winner error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to reveal winner');
+      } finally {
+        setLoading(false);
+      }
+    });
   };
 
   const isPlayer1 = gameState && gameState.player1 === userAddress;

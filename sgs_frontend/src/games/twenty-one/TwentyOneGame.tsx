@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { twentyOneService } from './twentyOneService';
 import { requestCache, createCacheKey } from '@/utils/requestCache';
 import { useWallet } from '@/hooks/useWallet';
@@ -68,7 +68,7 @@ const PlayingCard = ({ value, isHidden = false }: { value: number; isHidden?: bo
 
   if (isHidden) {
     return (
-      <div className="relative w-20 h-28 rounded-lg bg-gradient-to-br from-blue-600 to-blue-800 shadow-xl border-4 border-blue-900 flex items-center justify-center transform transition-all hover:scale-105">
+      <div className="relative w-20 h-28 rounded-md bg-gradient-to-br from-blue-600 to-blue-800 shadow-xl border-4 border-blue-900 flex items-center justify-center transform transition-all hover:scale-105">
         <div className="text-4xl">🎴</div>
       </div>
     );
@@ -78,7 +78,7 @@ const PlayingCard = ({ value, isHidden = false }: { value: number; isHidden?: bo
   const suit = getSuit(value);
 
   return (
-    <div className="relative w-20 h-28 rounded-lg bg-[#ffffff] shadow-xl border-2 border-gray-300 transform transition-all hover:scale-105 animate-dealCard overflow-hidden">
+    <div className="relative w-20 h-28 rounded-md bg-[#ffffff] shadow-xl border-2 border-gray-300 transform transition-all hover:scale-105 animate-dealCard overflow-hidden">
       {/* Center suit (single symbol) */}
       <div className={`absolute inset-0 flex items-center justify-center text-5xl leading-none ${suit.color} pointer-events-none select-none`}>
         {suit.symbol}
@@ -145,10 +145,23 @@ export function TwentyOneGame({
 
   const POINTS_DECIMALS = 7;
   const isBusy = loading || quickstartLoading;
+  const actionLock = useRef(false);
   const quickstartAvailable = walletType === 'dev'
     && DevWalletService.isDevModeAvailable()
     && DevWalletService.isPlayerAvailable(1)
     && DevWalletService.isPlayerAvailable(2);
+
+  const runAction = async (action: () => Promise<void>) => {
+    if (actionLock.current || isBusy) {
+      return;
+    }
+    actionLock.current = true;
+    try {
+      await action();
+    } finally {
+      actionLock.current = false;
+    }
+  };
 
   const parsePoints = (value: string): bigint | null => {
     try {
@@ -165,11 +178,8 @@ export function TwentyOneGame({
 
   const loadGameState = async () => {
     try {
-      const game = await requestCache.dedupe(
-        createCacheKey('twenty-one-game-state', sessionId),
-        () => twentyOneService.getGame(sessionId),
-        5000
-      );
+      // Always fetch latest game state to avoid stale cached results after transactions.
+      const game = await twentyOneService.getGame(sessionId);
 
       if (game) {
         setGameState(game);
@@ -330,274 +340,279 @@ export function TwentyOneGame({
   }, [importAuthEntryXDR, createMode, userAddress]);
 
   const handlePrepareTransaction = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      const p1Points = parsePoints(player1Points);
-      if (!p1Points || p1Points <= 0n) {
-        throw new Error('Enter a valid points amount');
-      }
-
-      const signer = getContractSigner();
-      const placeholderPlayer2Address = await getFundedSimulationSourceAddress([player1Address, userAddress]);
-      const placeholderP2Points = p1Points;
-
-      const authEntryXDR = await twentyOneService.prepareStartGame(
-        sessionId,
-        player1Address,
-        placeholderPlayer2Address,
-        p1Points,
-        placeholderP2Points,
-        signer
-      );
-
-      setExportedAuthEntryXDR(authEntryXDR);
-      setSuccess('Auth entry signed! Copy and send to Player 2. Waiting for them to sign...');
-
-      const pollInterval = setInterval(async () => {
-        try {
-          const game = await twentyOneService.getGame(sessionId);
-          if (game) {
-            clearInterval(pollInterval);
-            setGameState(game);
-            setExportedAuthEntryXDR(null);
-            setSuccess('Game created! Player 2 has signed and submitted.');
-            setGamePhase('play');
-            onStandingsRefresh();
-            setTimeout(() => setSuccess(null), 2000);
-          }
-        } catch (err) {
-          // Continue polling
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        const p1Points = parsePoints(player1Points);
+        if (!p1Points || p1Points <= 0n) {
+          throw new Error('Enter a valid points amount');
         }
-      }, 3000);
 
-      setTimeout(() => clearInterval(pollInterval), 300000);
-    } catch (err) {
-      console.error('Prepare transaction error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to prepare transaction');
-    } finally {
-      setLoading(false);
-    }
+        const signer = getContractSigner();
+        const placeholderPlayer2Address = await getFundedSimulationSourceAddress([player1Address, userAddress]);
+        const placeholderP2Points = p1Points;
+
+        const authEntryXDR = await twentyOneService.prepareStartGame(
+          sessionId,
+          player1Address,
+          placeholderPlayer2Address,
+          p1Points,
+          placeholderP2Points,
+          signer
+        );
+
+        setExportedAuthEntryXDR(authEntryXDR);
+        setSuccess('Auth entry signed! Copy and send to Player 2. Waiting for them to sign...');
+
+        const pollInterval = setInterval(async () => {
+          try {
+            const game = await twentyOneService.getGame(sessionId);
+            if (game) {
+              clearInterval(pollInterval);
+              setGameState(game);
+              setExportedAuthEntryXDR(null);
+              setSuccess('Game created! Player 2 has signed and submitted.');
+              setGamePhase('play');
+              onStandingsRefresh();
+              setTimeout(() => setSuccess(null), 2000);
+            }
+          } catch (err) {
+            // Continue polling
+          }
+        }, 3000);
+
+        setTimeout(() => clearInterval(pollInterval), 300000);
+      } catch (err) {
+        console.error('Prepare transaction error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to prepare transaction');
+      } finally {
+        setLoading(false);
+      }
+    });
   };
 
   const handleQuickStart = async () => {
-    try {
-      setQuickstartLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      if (walletType !== 'dev') {
-        throw new Error('Quickstart only works with dev wallets in the Games Library.');
-      }
-
-      if (!DevWalletService.isDevModeAvailable() || !DevWalletService.isPlayerAvailable(1) || !DevWalletService.isPlayerAvailable(2)) {
-        throw new Error('Quickstart requires both dev wallets. Run "bun run setup" and connect a dev wallet.');
-      }
-
-      const p1Points = parsePoints(player1Points);
-      if (!p1Points || p1Points <= 0n) {
-        throw new Error('Enter a valid points amount');
-      }
-
-      const originalPlayer = devWalletService.getCurrentPlayer();
-      let player1AddressQuickstart = '';
-      let player2AddressQuickstart = '';
-      let player1Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
-      let player2Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
-
+    await runAction(async () => {
       try {
-        await devWalletService.initPlayer(1);
-        player1AddressQuickstart = devWalletService.getPublicKey();
-        player1Signer = devWalletService.getSigner();
-
-        await devWalletService.initPlayer(2);
-        player2AddressQuickstart = devWalletService.getPublicKey();
-        player2Signer = devWalletService.getSigner();
-      } finally {
-        if (originalPlayer) {
-          await devWalletService.initPlayer(originalPlayer);
+        setQuickstartLoading(true);
+        setError(null);
+        setSuccess(null);
+        if (walletType !== 'dev') {
+          throw new Error('Quickstart only works with dev wallets in the Games Library.');
         }
-      }
 
-      if (!player1Signer || !player2Signer) {
-        throw new Error('Quickstart failed to initialize dev wallet signers.');
-      }
+        if (!DevWalletService.isDevModeAvailable() || !DevWalletService.isPlayerAvailable(1) || !DevWalletService.isPlayerAvailable(2)) {
+          throw new Error('Quickstart requires both dev wallets. Run "bun run setup" and connect a dev wallet.');
+        }
 
-      if (player1AddressQuickstart === player2AddressQuickstart) {
-        throw new Error('Quickstart requires two different dev wallets.');
-      }
+        const p1Points = parsePoints(player1Points);
+        if (!p1Points || p1Points <= 0n) {
+          throw new Error('Enter a valid points amount');
+        }
 
-      const quickstartSessionId = createRandomSessionId();
-      setSessionId(quickstartSessionId);
-      setPlayer1Address(player1AddressQuickstart);
-      setCreateMode('create');
-      setExportedAuthEntryXDR(null);
-      setImportAuthEntryXDR('');
-      setImportSessionId('');
-      setImportPlayer1('');
-      setImportPlayer1Points('');
-      setImportPlayer2Points(DEFAULT_POINTS);
-      setLoadSessionId('');
+        const originalPlayer = devWalletService.getCurrentPlayer();
+        let player1AddressQuickstart = '';
+        let player2AddressQuickstart = '';
+        let player1Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
+        let player2Signer: ReturnType<typeof devWalletService.getSigner> | null = null;
 
-      const placeholderPlayer2Address = await getFundedSimulationSourceAddress([
-        player1AddressQuickstart,
-        player2AddressQuickstart,
-      ]);
+        try {
+          await devWalletService.initPlayer(1);
+          player1AddressQuickstart = devWalletService.getPublicKey();
+          player1Signer = devWalletService.getSigner();
 
-      const authEntryXDR = await twentyOneService.prepareStartGame(
-        quickstartSessionId,
-        player1AddressQuickstart,
-        placeholderPlayer2Address,
-        p1Points,
-        p1Points,
-        player1Signer
-      );
+          await devWalletService.initPlayer(2);
+          player2AddressQuickstart = devWalletService.getPublicKey();
+          player2Signer = devWalletService.getSigner();
+        } finally {
+          if (originalPlayer) {
+            await devWalletService.initPlayer(originalPlayer);
+          }
+        }
 
-      const fullySignedTxXDR = await twentyOneService.importAndSignAuthEntry(
-        authEntryXDR,
-        player2AddressQuickstart,
-        p1Points,
-        player2Signer
-      );
+        if (!player1Signer || !player2Signer) {
+          throw new Error('Quickstart failed to initialize dev wallet signers.');
+        }
 
-      await twentyOneService.finalizeStartGame(
-        fullySignedTxXDR,
-        player2AddressQuickstart,
-        player2Signer
-      );
+        if (player1AddressQuickstart === player2AddressQuickstart) {
+          throw new Error('Quickstart requires two different dev wallets.');
+        }
 
-      try {
-        const game = await twentyOneService.getGame(quickstartSessionId);
-        setGameState(game);
-      } catch (err) {
-        console.log('Quickstart game not available yet:', err);
-      }
-      setGamePhase('play');
-      onStandingsRefresh();
-      setSuccess('Quickstart complete! Both players signed and the game is ready.');
-      setTimeout(() => setSuccess(null), 2000);
+        const quickstartSessionId = createRandomSessionId();
+        setSessionId(quickstartSessionId);
+        setPlayer1Address(player1AddressQuickstart);
+        setCreateMode('create');
+        setExportedAuthEntryXDR(null);
+        setImportAuthEntryXDR('');
+        setImportSessionId('');
+        setImportPlayer1('');
+        setImportPlayer1Points('');
+        setImportPlayer2Points(DEFAULT_POINTS);
+        setLoadSessionId('');
+
+        const placeholderPlayer2Address = await getFundedSimulationSourceAddress([
+          player1AddressQuickstart,
+          player2AddressQuickstart,
+        ]);
+
+        const authEntryXDR = await twentyOneService.prepareStartGame(
+          quickstartSessionId,
+          player1AddressQuickstart,
+          placeholderPlayer2Address,
+          p1Points,
+          p1Points,
+          player1Signer
+        );
+
+        const fullySignedTxXDR = await twentyOneService.importAndSignAuthEntry(
+          authEntryXDR,
+          player2AddressQuickstart,
+          p1Points,
+          player2Signer
+        );
+
+        await twentyOneService.finalizeStartGame(
+          fullySignedTxXDR,
+          player2AddressQuickstart,
+          player2Signer
+        );
+
+        try {
+          const game = await twentyOneService.getGame(quickstartSessionId);
+          setGameState(game);
+        } catch (err) {
+          console.log('Quickstart game not available yet:', err);
+        }
+        setGamePhase('play');
+        onStandingsRefresh();
+        setSuccess('Quickstart complete! Both players signed and the game is ready.');
+        setTimeout(() => setSuccess(null), 2000);
     } catch (err) {
       console.error('Quickstart error:', err);
       setError(err instanceof Error ? err.message : 'Quickstart failed');
     } finally {
       setQuickstartLoading(false);
     }
+    });
   };
 
   const handleImportTransaction = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      if (!importAuthEntryXDR.trim()) {
-        throw new Error('Enter auth entry XDR from Player 1');
+        if (!importAuthEntryXDR.trim()) {
+          throw new Error('Enter auth entry XDR from Player 1');
+        }
+        if (!importPlayer2Points.trim()) {
+          throw new Error('Enter your points amount (Player 2)');
+        }
+
+        const p2Points = parsePoints(importPlayer2Points);
+        if (!p2Points || p2Points <= 0n) {
+          throw new Error('Invalid Player 2 points');
+        }
+
+        const gameParams = twentyOneService.parseAuthEntry(importAuthEntryXDR.trim());
+
+        setImportSessionId(gameParams.sessionId.toString());
+        setImportPlayer1(gameParams.player1);
+        setImportPlayer1Points((Number(gameParams.player1Points) / 10_000_000).toString());
+
+        if (normalizeAddress(gameParams.player1) === normalizedUserAddress) {
+          throw new Error('Invalid game: You cannot play against yourself');
+        }
+
+        const signer = getContractSigner();
+
+        const fullySignedTxXDR = await twentyOneService.importAndSignAuthEntry(
+          importAuthEntryXDR.trim(),
+          userAddress,
+          p2Points,
+          signer
+        );
+
+        await twentyOneService.finalizeStartGame(
+          fullySignedTxXDR,
+          userAddress,
+          signer
+        );
+
+        setSessionId(gameParams.sessionId);
+        setSuccess('Game created successfully! Both players signed.');
+        setGamePhase('play');
+
+        setImportAuthEntryXDR('');
+        setImportSessionId('');
+        setImportPlayer1('');
+        setImportPlayer1Points('');
+        setImportPlayer2Points(DEFAULT_POINTS);
+
+        await loadGameState();
+        onStandingsRefresh();
+        setTimeout(() => setSuccess(null), 2000);
+      } catch (err) {
+        console.error('Import transaction error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to import and sign transaction');
+      } finally {
+        setLoading(false);
       }
-      if (!importPlayer2Points.trim()) {
-        throw new Error('Enter your points amount (Player 2)');
-      }
-
-      const p2Points = parsePoints(importPlayer2Points);
-      if (!p2Points || p2Points <= 0n) {
-        throw new Error('Invalid Player 2 points');
-      }
-
-      const gameParams = twentyOneService.parseAuthEntry(importAuthEntryXDR.trim());
-
-      setImportSessionId(gameParams.sessionId.toString());
-      setImportPlayer1(gameParams.player1);
-      setImportPlayer1Points((Number(gameParams.player1Points) / 10_000_000).toString());
-
-      if (normalizeAddress(gameParams.player1) === normalizedUserAddress) {
-        throw new Error('Invalid game: You cannot play against yourself');
-      }
-
-      const signer = getContractSigner();
-
-      const fullySignedTxXDR = await twentyOneService.importAndSignAuthEntry(
-        importAuthEntryXDR.trim(),
-        userAddress,
-        p2Points,
-        signer
-      );
-
-      await twentyOneService.finalizeStartGame(
-        fullySignedTxXDR,
-        userAddress,
-        signer
-      );
-
-      setSessionId(gameParams.sessionId);
-      setSuccess('Game created successfully! Both players signed.');
-      setGamePhase('play');
-
-      setImportAuthEntryXDR('');
-      setImportSessionId('');
-      setImportPlayer1('');
-      setImportPlayer1Points('');
-      setImportPlayer2Points(DEFAULT_POINTS);
-
-      await loadGameState();
-      onStandingsRefresh();
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      console.error('Import transaction error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to import and sign transaction');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const handleLoadExistingGame = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
+        const parsedSessionId = parseInt(loadSessionId.trim());
+        if (isNaN(parsedSessionId) || parsedSessionId <= 0) {
+          throw new Error('Enter a valid session ID');
+        }
 
-      const parsedSessionId = parseInt(loadSessionId.trim());
-      if (isNaN(parsedSessionId) || parsedSessionId <= 0) {
-        throw new Error('Enter a valid session ID');
+        const game = await requestCache.dedupe(
+          createCacheKey('twenty-one-game-state', parsedSessionId),
+          () => twentyOneService.getGame(parsedSessionId),
+          5000
+        );
+
+        if (!game) {
+          throw new Error('Game not found');
+        }
+
+        if (normalizeAddress(game.player1) !== normalizedUserAddress && normalizeAddress(game.player2) !== normalizedUserAddress) {
+          throw new Error('You are not a player in this game');
+        }
+
+        setSessionId(parsedSessionId);
+        setGameState(game);
+        setLoadSessionId('');
+
+        if (game.winner) {
+          setGamePhase('complete');
+          const isWinner = normalizeAddress(game.winner) === normalizedUserAddress;
+          setSuccess(isWinner ? '🎉 You won this game!' : 'Game complete. Winner revealed.');
+        } else if (game.player1_stuck && game.player2_stuck) {
+          setGamePhase('reveal');
+          setSuccess('Game loaded! Both players have stuck. You can reveal the winner.');
+        } else {
+          setGamePhase('play');
+          setSuccess('Game loaded! Continue playing.');
+        }
+
+        setTimeout(() => setSuccess(null), 2000);
+      } catch (err) {
+        console.error('Load game error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to load game');
+      } finally {
+        setLoading(false);
       }
-
-      const game = await requestCache.dedupe(
-        createCacheKey('twenty-one-game-state', parsedSessionId),
-        () => twentyOneService.getGame(parsedSessionId),
-        5000
-      );
-
-      if (!game) {
-        throw new Error('Game not found');
-      }
-
-      if (normalizeAddress(game.player1) !== normalizedUserAddress && normalizeAddress(game.player2) !== normalizedUserAddress) {
-        throw new Error('You are not a player in this game');
-      }
-
-      setSessionId(parsedSessionId);
-      setGameState(game);
-      setLoadSessionId('');
-
-      if (game.winner) {
-        setGamePhase('complete');
-        const isWinner = normalizeAddress(game.winner) === normalizedUserAddress;
-        setSuccess(isWinner ? '🎉 You won this game!' : 'Game complete. Winner revealed.');
-      } else if (game.player1_stuck && game.player2_stuck) {
-        setGamePhase('reveal');
-        setSuccess('Game loaded! Both players have stuck. You can reveal the winner.');
-      } else {
-        setGamePhase('play');
-        setSuccess('Game loaded! Continue playing.');
-      }
-
-      setTimeout(() => setSuccess(null), 2000);
-    } catch (err) {
-      console.error('Load game error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to load game');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const copyAuthEntryToClipboard = async () => {
@@ -631,73 +646,91 @@ export function TwentyOneGame({
   };
 
   const handleHit = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      const signer = getContractSigner();
-      await twentyOneService.hit(sessionId, userAddress, signer);
+        const signer = getContractSigner();
+        await twentyOneService.hit(sessionId, userAddress, signer);
 
-      setSuccess('Card drawn!');
-      await loadGameState();
+        setSuccess('Card drawn!');
+        await loadGameState();
 
-      // Check if player busted
-      if (gameState && gameState.winner) {
-        setTimeout(() => {
-          setSuccess(null);
-          setGamePhase('complete');
-        }, 1000);
+        // Check if player busted
+        if (gameState && gameState.winner) {
+          setTimeout(() => {
+            setSuccess(null);
+            setGamePhase('complete');
+          }, 1000);
+        }
+      } catch (err) {
+        console.error('Hit error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to draw card');
+      } finally {
+        setLoading(false);
       }
-    } catch (err) {
-      console.error('Hit error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to draw card');
-    } finally {
-      setLoading(false);
-    }
+    });
   };
 
   const handleStick = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      const signer = getContractSigner();
-      await twentyOneService.stick(sessionId, userAddress, signer);
+        const signer = getContractSigner();
+        await twentyOneService.stick(sessionId, userAddress, signer);
 
-      setSuccess('You stuck!');
-      await loadGameState();
-    } catch (err) {
-      console.error('Stick error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to stick');
-    } finally {
-      setLoading(false);
+        setSuccess('You stuck!');
+        await loadGameState();
+      } catch (err) {
+        console.error('Stick error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to stick');
+      } finally {
+        setLoading(false);
+      }
+    });
+  };
+
+  const waitForWinner = async () => {
+    let updatedGame = await twentyOneService.getGame(sessionId);
+    let attempts = 0;
+    while (attempts < 5 && (!updatedGame || !updatedGame.winner)) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      updatedGame = await twentyOneService.getGame(sessionId);
+      attempts += 1;
     }
+    return updatedGame;
   };
 
   const handleRevealWinner = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSuccess(null);
+    await runAction(async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setSuccess(null);
 
-      const signer = getContractSigner();
-      const winnerResult = await twentyOneService.revealWinner(sessionId, userAddress, signer);
+        const signer = getContractSigner();
+        const winnerResult = await twentyOneService.revealWinner(sessionId, userAddress, signer);
 
-      await loadGameState();
+        await waitForWinner();
+        await loadGameState();
 
-      const winner = (winnerResult as any).unwrap ? (winnerResult as any).unwrap() : winnerResult;
-      const isWinner = normalizeAddress(winner) === normalizedUserAddress;
-      setSuccess(isWinner ? '🎉 You won!' : 'Game complete! Winner revealed.');
+        const winner = (winnerResult as any).unwrap ? (winnerResult as any).unwrap() : winnerResult;
+        const isWinner = normalizeAddress(winner) === normalizedUserAddress;
+        setSuccess(isWinner ? '🎉 You won!' : 'Game complete! Winner revealed.');
 
-      onStandingsRefresh();
-    } catch (err) {
-      console.error('Reveal winner error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to reveal winner');
-    } finally {
-      setLoading(false);
-    }
+        onStandingsRefresh();
+      } catch (err) {
+        console.error('Reveal winner error:', err);
+        setError(err instanceof Error ? err.message : 'Failed to reveal winner');
+      } finally {
+        setLoading(false);
+      }
+    });
   };
 
   const isPlayer1 = !!gameState && normalizeAddress(gameState.player1) === normalizedUserAddress;
