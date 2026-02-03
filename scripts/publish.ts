@@ -187,9 +187,10 @@ export default function App() {
       ) : (
         <${componentName}
           userAddress={userAddress}
-          contractId={contractId}
           currentEpoch={1}
           availablePoints={1000000000n}
+          onBack={() => {}}
+          onStandingsRefresh={() => {}}
           onGameComplete={() => {}}
         />
       )}
