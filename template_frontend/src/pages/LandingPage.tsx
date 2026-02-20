@@ -1,9 +1,16 @@
-import { FC } from 'react';
+import { FC, useState } from 'react';
 import GridMotion from '../components/GridMotion';
 import { useWalletStandalone } from '../hooks/useWalletStandalone';
+import GamePage from './GamePage';
 
 const LandingPage: FC = () => {
   const { publicKey, connect, isConnected } = useWalletStandalone();
+  const [showRoomModal, setShowRoomModal] = useState(false);
+  const [roomCode, setRoomCode] = useState('');
+  const [createdRoomCode, setCreatedRoomCode] = useState<string | null>(null);
+  const [gameStarted, setGameStarted] = useState(false);
+  const [activeRoomCode, setActiveRoomCode] = useState<string>('');
+  const [isRoomCreator, setIsRoomCreator] = useState(false);
 
   // All UNO card images from assets
   const allUnoCards = [
@@ -44,6 +51,48 @@ const LandingPage: FC = () => {
   // Generate 28 random UNO cards for the grid
   const unoCardImages = getRandomCards(28);
 
+  const handleCreateRoom = () => {
+    // Generate a random room code
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    console.log('Creating room with code:', code);
+    setCreatedRoomCode(code);
+    // TODO: Implement room creation logic with backend
+  };
+
+  const handleJoinRoom = () => {
+    if (roomCode.trim()) {
+      console.log('Joining room:', roomCode);
+      setActiveRoomCode(roomCode);
+      setIsRoomCreator(false);
+      setGameStarted(true);
+      setShowRoomModal(false);
+      setRoomCode('');
+    }
+  };
+
+  const handleEnterGame = () => {
+    if (createdRoomCode) {
+      console.log('Entering game with room code:', createdRoomCode);
+      setActiveRoomCode(createdRoomCode);
+      setIsRoomCreator(true);
+      setGameStarted(true);
+      setShowRoomModal(false);
+      setCreatedRoomCode(null);
+    }
+  };
+
+  const copyRoomCode = () => {
+    if (createdRoomCode) {
+      navigator.clipboard.writeText(createdRoomCode);
+      // TODO: Show copied notification
+    }
+  };
+
+  // If game started, show game page
+  if (gameStarted && activeRoomCode) {
+    return <GamePage roomCode={activeRoomCode} isCreator={isRoomCreator} />;
+  }
+
   return (
     <div className="relative w-full h-screen overflow-hidden">
       {/* Animated background */}
@@ -57,13 +106,6 @@ const LandingPage: FC = () => {
             <h1 className="text-7xl md:text-8xl font-black text-white drop-shadow-2xl">
               ZK-UNO
             </h1>
-            <p className="text-2xl md:text-3xl font-bold text-white/90 drop-shadow-lg">
-              Invisible Hands, Provable Fairness
-            </p>
-            <p className="text-lg md:text-xl text-white/80 max-w-2xl mx-auto px-4 drop-shadow-lg">
-              Play UNO with zero-knowledge proofs on Stellar. 
-              Hidden hand counts. Verified moves. Cryptographically fair gameplay.
-            </p>
           </div>
 
           {/* Connect Wallet Button */}
@@ -75,7 +117,9 @@ const LandingPage: FC = () => {
                     Connected: {publicKey.slice(0, 6)}...{publicKey.slice(-4)}
                   </p>
                 </div>
-                <button className="px-12 py-5 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-bold text-xl rounded-xl shadow-2xl transform transition hover:scale-105 active:scale-95">
+                <button 
+                  onClick={() => setShowRoomModal(true)}
+                  className="px-12 py-5 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 text-white font-bold text-xl rounded-xl shadow-2xl transform transition hover:scale-105 active:scale-95">
                   Start Playing
                 </button>
               </div>
@@ -88,27 +132,108 @@ const LandingPage: FC = () => {
               </button>
             )}
           </div>
-
-          {/* Features */}
-          <div className="pt-8 grid grid-cols-1 md:grid-cols-3 gap-6 max-w-4xl mx-auto px-4">
-            <div className="bg-black/40 backdrop-blur-md p-6 rounded-xl shadow-xl border border-white/10">
-              <div className="text-4xl mb-2">🔒</div>
-              <h3 className="text-white font-bold text-lg mb-2">Hidden Hand Count</h3>
-              <p className="text-white/70 text-sm">No one knows your card count. No targeting.</p>
-            </div>
-            <div className="bg-black/40 backdrop-blur-md p-6 rounded-xl shadow-xl border border-white/10">
-              <div className="text-4xl mb-2">✅</div>
-              <h3 className="text-white font-bold text-lg mb-2">Provable Moves</h3>
-              <p className="text-white/70 text-sm">Every move is ZK-verified. No cheating possible.</p>
-            </div>
-            <div className="bg-black/40 backdrop-blur-md p-6 rounded-xl shadow-xl border border-white/10">
-              <div className="text-4xl mb-2">🎯</div>
-              <h3 className="text-white font-bold text-lg mb-2">Fair +4 Rules</h3>
-              <p className="text-white/70 text-sm">Wild Draw 4 legality cryptographically enforced.</p>
-            </div>
-          </div>
         </div>
       </div>
+
+      {/* Room Modal */}
+      {showRoomModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-auto">
+          {/* Backdrop */}
+          <div 
+            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            onClick={() => setShowRoomModal(false)}
+          ></div>
+          
+          {/* Modal Content */}
+          <div className="relative bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4 border border-white/10">
+            <button
+              onClick={() => setShowRoomModal(false)}
+              className="absolute top-4 right-4 text-white/60 hover:text-white text-2xl"
+            >
+              ×
+            </button>
+            
+            <h2 className="text-3xl font-bold text-white mb-6 text-center">Choose Game Mode</h2>
+            
+            {!createdRoomCode ? (
+              <div className="space-y-4">
+                {/* Create Room */}
+                <button
+                  onClick={handleCreateRoom}
+                  className="w-full px-8 py-4 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-bold text-lg rounded-xl shadow-xl transform transition hover:scale-105 active:scale-95"
+                >
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-2xl">➕</span>
+                    <span>Create New Room</span>
+                  </div>
+                </button>
+                
+                {/* Join Room */}
+                <div className="space-y-3">
+                  <div className="text-center text-white/60 text-sm">OR</div>
+                  <input
+                    type="text"
+                    placeholder="Enter Room Code"
+                    value={roomCode}
+                    onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
+                    className="w-full px-4 py-3 bg-black/30 border border-white/20 rounded-lg text-white placeholder-white/40 focus:outline-none focus:border-blue-500 text-center text-lg font-mono"
+                    maxLength={6}
+                  />
+                  <button
+                    onClick={handleJoinRoom}
+                    disabled={!roomCode.trim()}
+                    className="w-full px-8 py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-bold text-lg rounded-xl shadow-xl transform transition hover:scale-105 active:scale-95 disabled:scale-100"
+                  >
+                    <div className="flex items-center justify-center gap-3">
+                      <span className="text-2xl">🚪</span>
+                      <span>Join Existing Room</span>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Room Created - Show Code */
+              <div className="space-y-6">
+                <div className="text-center space-y-3">
+                  <p className="text-white/80 text-sm">Room Created! Share this code:</p>
+                  <div className="bg-black/40 border-2 border-green-500/50 rounded-xl p-6">
+                    <div className="text-5xl font-bold text-green-400 tracking-widest font-mono">
+                      {createdRoomCode}
+                    </div>
+                  </div>
+                  <button
+                    onClick={copyRoomCode}
+                    className="text-white/60 hover:text-white text-sm flex items-center justify-center gap-2 mx-auto transition"
+                  >
+                    <span>📋</span>
+                    <span>Copy Code</span>
+                  </button>
+                </div>
+                
+                <button
+                  onClick={handleEnterGame}
+                  className="w-full px-8 py-4 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white font-bold text-lg rounded-xl shadow-xl transform transition hover:scale-105 active:scale-95"
+                >
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="text-2xl">🎮</span>
+                    <span>Enter Game</span>
+                  </div>
+                </button>
+                
+                <button
+                  onClick={() => {
+                    setCreatedRoomCode(null);
+                    setShowRoomModal(false);
+                  }}
+                  className="w-full px-4 py-2 text-white/60 hover:text-white text-sm transition"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
