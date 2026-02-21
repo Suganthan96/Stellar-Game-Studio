@@ -1,0 +1,6 @@
+# RISC Zero zkVM target configuration
+# Enables the custom backend for getrandom v0.3 which is required when building
+# for riscv32im-risc0-zkvm-elf. The risc0-zkvm-platform crate provides the
+# `__getrandom_v03_custom` symbol that getrandom calls.
+[target.riscv32im-risc0-zkvm-elf]
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

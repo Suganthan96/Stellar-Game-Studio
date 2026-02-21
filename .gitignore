@@ -39,3 +39,9 @@ frontend-template/*.tsbuildinfo
 # OS
 .DS_Store
 Thumbs.db
+.env
+
+# Scratch / notes (not part of the project)
+quickstart_hack.txt
+risc0.txt
+package-lock.json
