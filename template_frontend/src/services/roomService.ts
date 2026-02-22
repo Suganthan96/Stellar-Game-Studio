@@ -18,6 +18,9 @@ export interface Room {
   deckCards: number;
   gameStarted: boolean;
   lastUpdate: number;
+  pendingDraw?: number;
+  gameEnded?: boolean;
+  winner?: 1 | 2;
 }
 
 const ROOM_PREFIX = 'uno_room_';

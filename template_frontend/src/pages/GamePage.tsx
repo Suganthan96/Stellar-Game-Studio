@@ -25,6 +25,9 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
   const [bothPlayersPresent, setBothPlayersPresent] = useState(false);
   const [roomService, setRoomService] = useState<RoomService | null>(null);
   const [waitingForPlayer, setWaitingForPlayer] = useState(true);
+  const [gameDirection, setGameDirection] = useState<'clockwise' | 'counterclockwise'>('clockwise');
+  const [selectedWildColor, setSelectedWildColor] = useState<'Red' | 'Blue' | 'Green' | 'Yellow' | null>(null);
+  const [showColorPicker, setShowColorPicker] = useState(false);
 
   // All available UNO cards
   const allUnoCards = [
@@ -101,9 +104,145 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
     return shuffled.slice(0, count).map(createCard);
   };
 
+  // Deal cards to both players from a shuffled deck
+  const dealCardsToPlayers = (cardsPerPlayer: number): { player1: Card[], player2: Card[] } => {
+    // Create a full deck with duplicates (like a real UNO deck)
+    const fullDeck = [...allUnoCards, ...allUnoCards];
+    
+    // Fisher-Yates shuffle for better randomization with timestamp seed
+    const timestamp = Date.now();
+    for (let i = fullDeck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [fullDeck[i], fullDeck[j]] = [fullDeck[j], fullDeck[i]];
+    }
+    
+    // Deal cards from the shuffled deck - ensuring they're different
+    const player1Cards = fullDeck.slice(0, cardsPerPlayer).map((card, idx) => createCard(card));
+    const player2Cards = fullDeck.slice(cardsPerPlayer, cardsPerPlayer * 2).map((card, idx) => createCard(card));
+    
+    // Detailed logging
+    console.log('=== DEALING CARDS ===');
+    console.log('Player 1 cards:', player1Cards.map(c => `${c.color} ${c.value}`).join(', '));
+    console.log('Player 2 cards:', player2Cards.map(c => `${c.color} ${c.value}`).join(', '));
+    console.log('Are they different?', JSON.stringify(player1Cards) !== JSON.stringify(player2Cards));
+    
+    return { player1: player1Cards, player2: player2Cards };
+  };
+
+  // UNO GAME RULES IMPLEMENTATION
+
+  // Check if a card can be played on the current card
+  const canPlayCard = (card: Card, current: Card | null): boolean => {
+    if (!current) return false;
+    
+    // Wild cards can always be played
+    if (card.color === 'Wild') return true;
+    
+    // Match by color
+    if (card.color === current.color) return true;
+    
+    // Match by value (number or action)
+    if (card.value === current.value) return true;
+    
+    return false;
+  };
+
+  // Check if player has any playable cards
+  const hasPlayableCard = (hand: Card[], current: Card | null): boolean => {
+    if (!current) return false;
+    return hand.some(card => canPlayCard(card, current));
+  };
+
+  // Get next player number based on direction
+  const getNextPlayer = (): 1 | 2 => {
+    // In 2-player game, direction doesn't matter, always alternate
+    return playerNumber === 1 ? 2 : 1;
+  };
+
+  // Apply card action effects
+  const applyCardAction = (card: Card, nextPlayer: 1 | 2) => {
+    const room = roomService?.getRoom();
+    if (!room) return;
+
+    switch (card.value) {
+      case 'Reverse':
+        // In 2-player game, Reverse acts like Skip
+        console.log('Reverse card played - acts as Skip in 2-player game');
+        // Player gets another turn
+        roomService?.updateRoom({ currentTurn: playerNumber! });
+        setIsMyTurn(true);
+        break;
+
+      case 'Skip':
+        console.log('Skip card played - opponent loses turn');
+        // Player gets another turn
+        roomService?.updateRoom({ currentTurn: playerNumber! });
+        setIsMyTurn(true);
+        break;
+
+      case 'Draw':
+        console.log('Draw Two card played - opponent draws 2 cards');
+        // Opponent draws 2 cards and loses turn
+        // This will be handled in the opponent's window
+        roomService?.updateRoom({ 
+          currentTurn: playerNumber!,  // Player gets another turn
+          pendingDraw: 2
+        });
+        setIsMyTurn(true);
+        break;
+
+      case 'Wild_Draw':
+        console.log('Wild Draw Four played - opponent draws 4 cards');
+        // Show color picker for wild card
+        setShowColorPicker(true);
+        break;
+
+      case 'Wild':
+        console.log('Wild card played');
+        // Show color picker
+        setShowColorPicker(true);
+        break;
+
+      default:
+        // Normal card, switch turns
+        roomService?.updateRoom({ currentTurn: nextPlayer });
+        setIsMyTurn(false);
+        break;
+    }
+  };
+
+  // Handle wild color selection
+  const selectWildColor = (color: 'Red' | 'Blue' | 'Green' | 'Yellow') => {
+    if (!roomService || !currentCard) return;
+
+    setSelectedWildColor(color);
+    setShowColorPicker(false);
+
+    // Update the current card color in the room
+    const updatedCard = { ...currentCard, color };
+    
+    const isPlusFour = currentCard.value === 'Wild_Draw';
+    
+    roomService.updateRoom({ 
+      currentCard: updatedCard,
+      currentTurn: playerNumber!,  // Player who played wild gets another turn
+      pendingDraw: isPlusFour ? 4 : 0
+    });
+
+    console.log(`Wild color selected: ${color}${isPlusFour ? ' - opponent must draw 4' : ''}`);
+  };
+
   // Initialize game
   useEffect(() => {
-    const playerId = publicKey || `player_${Date.now()}`;
+    // Generate a unique player ID for this browser session
+    let playerId = sessionStorage.getItem('uno_player_session_id');
+    if (!playerId) {
+      playerId = `player_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      sessionStorage.setItem('uno_player_session_id', playerId);
+    }
+    
+    console.log('Player ID for this session:', playerId, 'isCreator:', isCreator);
+    
     let service: RoomService;
 
     // Clean up old rooms
@@ -115,6 +254,7 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
       service = new RoomService(roomCode, playerId);
       setPlayerNumber(1);
       setIsMyTurn(true);
+      console.log('Created room as Player 1');
     } else {
       // Join room
       const room = RoomService.joinRoom(roomCode, playerId, publicKey || '');
@@ -125,6 +265,7 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
       service = new RoomService(roomCode, playerId);
       setPlayerNumber(2);
       setIsMyTurn(false);
+      console.log('Joined room as Player 2');
     }
 
     setRoomService(service);
@@ -148,12 +289,11 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
 
       // Start game when both players present and not started
       if (bothPresent && !room.gameStarted && isCreator) {
-        // Deal cards to both players
-        const player1Hand = getRandomCards(7);
-        const player2Hand = getRandomCards(7);
+        // Deal unique cards to both players from a shuffled deck
+        const { player1, player2 } = dealCardsToPlayers(7);
         
-        room.players[0].hand = player1Hand;
-        room.players[1].hand = player2Hand;
+        room.players[0].hand = player1;
+        room.players[1].hand = player2;
 
         // Set starting card
         const startingCards = allUnoCards.filter(c => 
@@ -162,16 +302,28 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
         const randomStart = startingCards[Math.floor(Math.random() * startingCards.length)];
         const startCard = createCard(randomStart);
         
+        // First update players with their hands
+        service.updateRoom({ players: room.players });
+        console.log('=== GAME STARTED BY PLAYER 1 ===');
+        console.log('Player 1 hand being saved:', player1.map(c => `${c.color} ${c.value}`).join(', '));
+        console.log('Player 2 hand being saved:', player2.map(c => `${c.color} ${c.value}`).join(', '));
+        
+        // Then start the game with the initial card
         service.startGame(startCard);
         setCurrentCard(startCard);
-        setPlayerHand(player1Hand);
+        setPlayerHand(player1);
       } else if (room.gameStarted) {
         // Load game state
         const myPlayer = room.players.find(p => p.playerNumber === myPlayerNum);
-        if (myPlayer && myPlayer.hand.length > 0) {
+        
+        // Only update hand if we don't have cards yet
+        if (myPlayer && myPlayer.hand && myPlayer.hand.length > 0 && playerHand.length === 0) {
+          console.log('=== LOADING HAND FOR PLAYER', myPlayerNum, '===');
+          console.log('Cards loaded:', myPlayer.hand.map((c: Card) => `${c.color} ${c.value}`).join(', '));
           setPlayerHand(myPlayer.hand);
         }
-        if (room.currentCard) {
+        
+        if (room.currentCard && !currentCard) {
           setCurrentCard(room.currentCard);
         }
         setIsMyTurn(room.currentTurn === myPlayerNum);
@@ -184,41 +336,88 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
   const handleDrawCard = () => {
     if (!isMyTurn || !roomService) return;
     
-    const newCard = getRandomCards(1)[0];
-    const newHand = [...playerHand, newCard];
+    const room = roomService.getRoom();
+    if (!room) return;
+
+    // Check if there's a pending draw (from Draw Two or Wild Draw Four)
+    const pendingDraw = (room as any).pendingDraw || 0;
+    const cardsToDraw = pendingDraw > 0 ? pendingDraw : 1;
+
+    // Draw the required number of cards
+    const newCards = getRandomCards(cardsToDraw);
+    const newHand = [...playerHand, ...newCards];
     setPlayerHand(newHand);
-    setDeckCount(deckCount - 1);
+    setDeckCount(deckCount - cardsToDraw);
+    
+    console.log(`Drew ${cardsToDraw} card(s)${pendingDraw > 0 ? ' (penalty)' : ''}`);
     
     // Update room
     roomService.updatePlayerHand(playerNumber!, newHand);
-    const room = roomService.getRoom();
-    if (room) {
-      const nextTurn = playerNumber === 1 ? 2 : 1;
-      roomService.updateRoom({ currentTurn: nextTurn as 1 | 2 });
+    
+    // If player drew due to penalty, they lose their turn
+    // If normal draw and card can't be played, lose turn
+    const drewCard = newCards[0];
+    const canPlayDrawnCard = cardsToDraw === 1 && canPlayCard(drewCard, currentCard);
+    
+    if (pendingDraw > 0 || !canPlayDrawnCard) {
+      // Lose turn
+      const nextTurn = getNextPlayer();
+      roomService.updateRoom({ 
+        currentTurn: nextTurn,
+        pendingDraw: 0  // Clear penalty
+      });
+      setIsMyTurn(false);
+    } else {
+      // Can play the drawn card immediately if desired
+      console.log('Drew a playable card!');
     }
-    setIsMyTurn(false);
   };
 
   const handlePlayCard = (card: Card) => {
-    if (!isMyTurn || !roomService) return;
+    if (!isMyTurn || !roomService || !currentCard) return;
     
-    // TODO: Add card validation logic
+    // Validate card can be played
+    if (!canPlayCard(card, currentCard)) {
+      alert(`Cannot play ${card.color} ${card.value} on ${currentCard.color} ${currentCard.value}`);
+      return;
+    }
+    
     const newHand = playerHand.filter(c => c.id !== card.id);
     setCurrentCard(card);
     setPlayerHand(newHand);
     
-    // Update room
+    // Update room with new hand
     roomService.updatePlayerHand(playerNumber!, newHand);
-    roomService.updateRoom({ 
-      currentCard: card,
-      currentTurn: (playerNumber === 1 ? 2 : 1) as 1 | 2
-    });
-    
-    setIsMyTurn(false);
     
     // Check for UNO
     if (newHand.length === 1) {
-      console.log('UNO!');
+      console.log('UNO! One card left!');
+      alert('UNO!');
+    }
+    
+    // Check for win
+    if (newHand.length === 0) {
+      console.log(`Player ${playerNumber} wins!`);
+      alert(`You win! 🎉`);
+      roomService.updateRoom({ 
+        currentCard: card,
+        gameEnded: true,
+        winner: playerNumber || undefined
+      });
+      return;
+    }
+    
+    // Apply card action and determine next turn
+    const nextPlayer = getNextPlayer();
+    applyCardAction(card, nextPlayer);
+    
+    // Update current card in room (unless it's a wild card waiting for color selection)
+    if (card.color !== 'Wild' || card.value === 'Wild' || card.value === 'Wild_Draw') {
+      if (!showColorPicker) {
+        roomService.updateRoom({ currentCard: card });
+      }
+    } else {
+      roomService.updateRoom({ currentCard: card });
     }
   };
 
@@ -336,6 +535,41 @@ const GamePage: FC<GamePageProps> = ({ roomCode, isCreator }) => {
       ) : !isMyTurn && (
         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-black/60 backdrop-blur-md px-8 py-4 rounded-xl border border-white/30 pointer-events-none">
           <p className="text-white font-bold text-xl">Opponent's turn...</p>
+        </div>
+      )}
+
+      {/* Wild Card Color Picker */}
+      {showColorPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl shadow-2xl p-8 border border-white/20">
+            <h3 className="text-white font-bold text-2xl mb-6 text-center">Choose a Color</h3>
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={() => selectWildColor('Red')}
+                className="w-32 h-32 bg-red-600 hover:bg-red-700 rounded-xl shadow-xl transform transition hover:scale-110 active:scale-95 border-4 border-white/30"
+              >
+                <span className="text-white font-bold text-xl">Red</span>
+              </button>
+              <button
+                onClick={() => selectWildColor('Blue')}
+                className="w-32 h-32 bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xl transform transition hover:scale-110 active:scale-95 border-4 border-white/30"
+              >
+                <span className="text-white font-bold text-xl">Blue</span>
+              </button>
+              <button
+                onClick={() => selectWildColor('Green')}
+                className="w-32 h-32 bg-green-600 hover:bg-green-700 rounded-xl shadow-xl transform transition hover:scale-110 active:scale-95 border-4 border-white/30"
+              >
+                <span className="text-white font-bold text-xl">Green</span>
+              </button>
+              <button
+                onClick={() => selectWildColor('Yellow')}
+                className="w-32 h-32 bg-yellow-500 hover:bg-yellow-600 rounded-xl shadow-xl transform transition hover:scale-110 active:scale-95 border-4 border-white/30"
+              >
+                <span className="text-white font-bold text-xl">Yellow</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
