@@ -1,0 +1,32 @@
+{
+  "name": "zk-uno-nextjs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3002",
+    "build": "next build",
+    "start": "next start --port 3002",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@jsr/creit-tech__stellar-wallets-kit": "^2.0.0-beta.9",
+    "@noble/hashes": "^1.7.2",
+    "@stellar/stellar-sdk": "^13.1.0",
+    "buffer": "^6.0.3",
+    "next": "14.2.29",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.30",
+    "@types/react": "^18.3.20",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "14.2.29",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.2"
+  }
+}
