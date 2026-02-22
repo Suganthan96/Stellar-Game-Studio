@@ -59,6 +59,7 @@ export const MOCK_GAME_HUB_CONTRACT = getContractId('mock-game-hub');
 export const TWENTY_ONE_CONTRACT = getContractId('twenty-one');
 export const NUMBER_GUESS_CONTRACT = getContractId('number-guess');
 export const DICE_DUEL_CONTRACT = getContractId('dice-duel');
+export const ZK_UNO_CONTRACT = getContractId('zk-uno');
 
 // Dev wallet addresses
 export const DEV_ADMIN_ADDRESS = import.meta.env.VITE_DEV_ADMIN_ADDRESS || '';

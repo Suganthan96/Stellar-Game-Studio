@@ -6,6 +6,7 @@
       "name": "stellar-game-studio-frontend",
       "dependencies": {
         "@creit-tech/stellar-wallets-kit": "npm:@jsr/creit-tech__stellar-wallets-kit@2.0.0-beta.5",
+        "@noble/hashes": "^1.7.2",
         "@stellar/freighter-api": "^6.0.1",
         "@stellar/stellar-sdk": "^14.4.2",
         "buffer": "^6.0.3",

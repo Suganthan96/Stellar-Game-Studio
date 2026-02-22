@@ -879,6 +879,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mock-risc0-verifier"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1074,6 +1081,14 @@ checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
  "hmac",
  "subtle",
+]
+
+[[package]]
+name = "risc0-interface"
+version = "0.1.0"
+source = "git+https://github.com/NethermindEth/stellar-risc0-verifier#021d57f6773570422a40671b5bf1e2ae19e74c92"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1364,9 +1379,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-ledger-snapshot"
-version = "25.0.2"
+version = "25.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab9d1bfa6f7d57307bf8241789b13d3703438e7afa0527aa098a357ef757d3a2"
+checksum = "66d569a1315f05216d024653ad87541aa15d3ff26dad9f8a98719cb53ccf2bf3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1378,9 +1393,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-sdk"
-version = "25.0.2"
+version = "25.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9953e782d6da30974eea520c2b5f624c28bbc518c3bb926ec581242dd3f9d2a2"
+checksum = "add8d19cfd2c9941bbdc7c8223c3cf9d7ff9af4554ba3bd4ae93e16b19b08aea"
 dependencies = [
  "arbitrary",
  "bytes-lit",
@@ -1402,9 +1417,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-sdk-macros"
-version = "25.0.2"
+version = "25.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a8cecb6acc735670dad3303c6a9d2b47e51adfb11224ad5a8ced55fd7b0a600"
+checksum = "2a0107e34575ec704ce29407695462e79e6b0e13ce7af6431b2f15c313e34464"
 dependencies = [
  "darling 0.20.11",
  "heck",
@@ -1422,9 +1437,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-spec"
-version = "25.0.2"
+version = "25.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c79501d0636f86fe2c9b1dd7e88b9397415b3493a59b34f466abd7758c84b92b"
+checksum = "53a1c9f6ccc6aa78518545e3cf542bd26f11d9085328a2e1c06c90514733fe15"
 dependencies = [
  "base64",
  "stellar-xdr",
@@ -1434,9 +1449,9 @@ dependencies = [
 
 [[package]]
 name = "soroban-spec-rust"
-version = "25.0.2"
+version = "25.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b520b5fb013fde70796d9a6057591f53817aa0c38f8bad460126f97f59394af9"
+checksum = "e8247d3c6256b544b2461606c6892351bb22978d751e07c1aea744377053d852"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -1835,4 +1850,12 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
+]
+
+[[package]]
+name = "zk-uno"
+version = "0.1.0"
+dependencies = [
+ "risc0-interface",
+ "soroban-sdk",
 ]

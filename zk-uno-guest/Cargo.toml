@@ -1,0 +1,46 @@
+[workspace]
+
+[package]
+name = "zk-uno-guest"
+version = "0.1.0"
+edition = "2021"
+
+# This crate is intentionally NOT part of the Soroban workspace.
+# It compiles to the RISC-V riscv32im-risc0-zkvm-elf target, not wasm32v1-none.
+#
+# Prerequisites (run once):
+#   rzup install          # installs the RISC Zero toolchain
+#   rzup install cargo-risczero
+#
+# Build:
+#   cd zk-uno-guest && cargo +risc0 risczero build
+#
+# The IMAGE_ID printed by the build should be copied into:
+#   contracts/zk-uno/src/lib.rs  →  ZK_UNO_IMAGE_ID constant
+
+[[bin]]
+name = "zk-uno-guest"
+path = "src/main.rs"
+
+# Move proof: proves a card play without revealing hand contents or count
+[[bin]]
+name = "zk-uno-move"
+path = "src/move_main.rs"
+
+# Draw proof: proves a card draw without revealing hand contents or count
+[[bin]]
+name = "zk-uno-draw"
+path = "src/draw_main.rs"
+
+# Declare-UNO proof: proves the player has exactly one card in their committed hand
+[[bin]]
+name = "zk-uno-uno"
+path = "src/uno_main.rs"
+
+[dependencies]
+# RISC Zero zkVM guest support (no_std, RISC-V target) — version matches toolchain 3.0.5
+risc0-zkvm = { version = "^3.0.5", default-features = false, features = ["std"] }
+# SHA-256 for computing keccak256 fallback via RISC Zero host oracles
+sha2 = { version = "0.10", default-features = false }
+# tiny-keccak for keccak256 inside the guest (no_std compatible)
+tiny-keccak = { version = "2.0", features = ["keccak"] }
