@@ -141,6 +141,26 @@ export const ZK_UNO_UNO_IMAGE_ID = new Uint8Array([
 
 export const GROTH16_RISC0_SELECTOR = new Uint8Array([0x73, 0xc4, 0x57, 0xba]);
 
+// ─── Logging helpers ──────────────────────────────────────────────────────────
+
+export function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function zkLog(step: string, data?: Record<string, unknown>) {
+  const prefix = '%c[ZK-UNO PROOF]';
+  const style  = 'color: #a78bfa; font-weight: bold;';
+  if (data) {
+    console.groupCollapsed(`${prefix} ${step}`, style);
+    for (const [k, v] of Object.entries(data)) {
+      console.log(`  ${k}:`, v);
+    }
+    console.groupEnd();
+  } else {
+    console.log(prefix + ' ' + step, style);
+  }
+}
+
 // ─── SHA-256 / ZK seal helpers ─────────────────────────────────────────────────
 
 export async function sha256Async(data: Uint8Array): Promise<Uint8Array> {
@@ -154,6 +174,11 @@ export function buildZkJournalBytes(sessionId: number, handHash: Uint8Array): Ui
   const out = new Uint8Array(36);
   new DataView(out.buffer).setUint32(0, sessionId, false);
   out.set(handHash, 4);
+  zkLog('📋 COMMIT Journal (36 bytes)', {
+    'session_id (u32 BE)' : sessionId.toString(),
+    'hand_hash  [32]'     : toHex(handHash),
+    'full journal hex'    : toHex(out),
+  });
   return out;
 }
 
@@ -162,6 +187,11 @@ export async function buildMockSeal(
   journalSha256: Uint8Array,
   selector: Uint8Array = GROTH16_RISC0_SELECTOR
 ): Promise<Uint8Array> {
+  console.group('%c[ZK-UNO] 🔐 Building Mock ZK Seal (ReceiptClaim digest)', 'color:#a78bfa;font-weight:bold;font-size:13px');
+  console.log('  📌 ImageID      :', toHex(imageId));
+  console.log('  📌 JournalSHA256:', toHex(journalSha256));
+  console.log('  📌 Selector     :', toHex(selector));
+
   const TAG_OUTPUT = new Uint8Array([
     0x77, 0xea, 0xfe, 0xb3, 0xdf, 0xc3, 0x4a, 0x1c,
     0x6b, 0x44, 0x5d, 0x3e, 0xf2, 0x6d, 0x12, 0x32,
@@ -171,6 +201,8 @@ export async function buildMockSeal(
   const zeros32 = new Uint8Array(32);
   const outputLenTag = new Uint8Array([0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
   const outputDigest = await sha256Async(concat(concat(concat(TAG_OUTPUT, journalSha256), zeros32), outputLenTag));
+  console.log('  🔷 Step 1 — Output.digest (sha256(TAG_OUTPUT || journalSha256 || zeros32 || lenTag)):');
+  console.log('             ', toHex(outputDigest));
 
   const TAG_CLAIM = new Uint8Array([
     0xcb, 0x1f, 0xef, 0xcd, 0x6d, 0xda, 0x1c, 0x3c,
@@ -191,10 +223,18 @@ export async function buildMockSeal(
   const claimDigest = await sha256Async(
     concat(concat(concat(concat(concat(TAG_CLAIM, zeros32), imageId), POST_STATE_HALTED), outputDigest), claimSuffix)
   );
+  console.log('  🔷 Step 2 — ReceiptClaim.digest (sha256(TAG_CLAIM || zeros32 || imageId || POST_STATE_HALTED || outputDigest || suffix)):');
+  console.log('             ', toHex(claimDigest));
 
   const seal = new Uint8Array(36);
   seal.set(selector, 0);
   seal.set(claimDigest, 4);
+
+  console.log('  ✅ Step 3 — Final Seal (selector[4] || claimDigest[32]):');
+  console.log('             ', toHex(seal));
+  console.log('  📦 Seal size: 36 bytes — accepted by testnet mock verifier');
+  console.groupEnd();
+
   return seal;
 }
 
@@ -205,6 +245,8 @@ export function buildMoveJournalBytes(
   playedColour: number, playedValue: number, wildColour: number,
   activeColour: number, isWinner: boolean, isUno: boolean
 ): Uint8Array {
+  const COLOUR_NAMES = ['Red','Yellow','Green','Blue','Wild'];
+  const VALUE_NAMES  = (v: number) => v <= 9 ? String(v) : ['Skip','Rev','+2','Wild','+4'][v-10] ?? '?';
   const out = new Uint8Array(74);
   const v = new DataView(out.buffer);
   v.setUint32(0, sessionId >>> 0, false);
@@ -216,6 +258,17 @@ export function buildMoveJournalBytes(
   out[71] = activeColour & 0xff;
   out[72] = isWinner ? 1 : 0;
   out[73] = isUno    ? 1 : 0;
+  zkLog('📋 MOVE Journal (74 bytes)', {
+    'session_id'    : sessionId,
+    'old_hand_hash' : toHex(oldHash),
+    'new_hand_hash' : toHex(newHash),
+    'played_card'   : `${COLOUR_NAMES[playedColour] ?? playedColour} ${VALUE_NAMES(playedValue)}`,
+    'wild_colour'   : COLOUR_NAMES[wildColour] ?? wildColour,
+    'active_colour' : COLOUR_NAMES[activeColour] ?? activeColour,
+    'is_winner'     : isWinner,
+    'is_uno'        : isUno,
+    'full journal'  : toHex(out),
+  });
   return out;
 }
 
@@ -228,6 +281,13 @@ export function buildDrawJournalBytes(
   out.set(oldHash, 4);
   out.set(newHash, 36);
   v.setUint32(68, drawCount >>> 0, false);
+  zkLog('📋 DRAW Journal (72 bytes)', {
+    'session_id'    : sessionId,
+    'old_hand_hash' : toHex(oldHash),
+    'new_hand_hash' : toHex(newHash),
+    'draw_count'    : drawCount,
+    'full journal'  : toHex(out),
+  });
   return out;
 }
 
@@ -295,16 +355,27 @@ export function hasMatchingColour(hand: Card[], activeColour: number): boolean {
 // ─── Prover server ────────────────────────────────────────────────────────────
 
 async function callProver(endpoint: string, body: Record<string, unknown>): Promise<Uint8Array | undefined> {
+  const url = `${PROVER_URL}${endpoint}`;
+  console.log('%c[ZK-UNO] 🌐 Calling prover server...', 'color:#34d399;font-weight:bold', url);
   try {
-    const resp = await fetch(`${PROVER_URL}${endpoint}`, {
+    const resp = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!resp.ok) return undefined;
-    const { seal } = await resp.json();
-    return new Uint8Array(Buffer.from(seal as string, 'hex'));
-  } catch {
+    if (!resp.ok) {
+      console.warn('%c[ZK-UNO] ⚠️  Prover server responded with error — falling back to browser mock seal', 'color:#fbbf24;font-weight:bold', resp.status, resp.statusText);
+      return undefined;
+    }
+    const json = await resp.json();
+    console.log('%c[ZK-UNO] ✅ Prover server returned seal', 'color:#34d399;font-weight:bold', {
+      seal   : json.seal,
+      journal: json.journal,
+      is_mock: json.is_mock,
+    });
+    return new Uint8Array(Buffer.from(json.seal as string, 'hex'));
+  } catch (err) {
+    console.warn('%c[ZK-UNO] ⚠️  Prover server unreachable — falling back to browser mock seal', 'color:#fbbf24;font-weight:bold', String(err));
     return undefined;
   }
 }
@@ -637,18 +708,34 @@ export class ZkUnoService {
     p: WalletSigner,
     privateInputs?: { handBytes: Uint8Array; salt: Uint8Array }
   ) {
+    console.group('%c[ZK-UNO] 🃏 commitHandZk', 'color:#818cf8;font-weight:bold;font-size:13px');
+    console.log('  session_id :', sessionId);
+    console.log('  player     :', player);
+    console.log('  hand_hash  :', toHex(handHash));
+
     let seal: Uint8Array;
     if (privateInputs) {
+      console.log('  🔑 Private inputs provided — trying prover server first');
       const proverSeal = await callProver('/prove/commit', {
         hand_bytes: Array.from(privateInputs.handBytes),
         salt: Array.from(privateInputs.salt),
         session_id: sessionId,
         hand_hash: Buffer.from(handHash).toString('hex'),
       });
-      seal = proverSeal ?? await buildMockSeal(ZK_UNO_IMAGE_ID, await sha256Async(buildZkJournalBytes(sessionId, handHash)));
+      if (proverSeal) {
+        seal = proverSeal;
+        console.log('  ✅ Using prover server seal:', toHex(seal));
+      } else {
+        console.log('  🔁 Prover unavailable — generating browser mock seal');
+        seal = await buildMockSeal(ZK_UNO_IMAGE_ID, await sha256Async(buildZkJournalBytes(sessionId, handHash)));
+      }
     } else {
+      console.log('  🔁 No private inputs — generating browser mock seal');
       seal = await buildMockSeal(ZK_UNO_IMAGE_ID, await sha256Async(buildZkJournalBytes(sessionId, handHash)));
     }
+
+    console.log('  📦 Final seal (36 bytes):', toHex(seal));
+    console.log('  📡 Submitting commit_hand_zk transaction...');
 
     const client = this.signingClient(p);
     const tx = await client.commit_hand_zk({
@@ -657,7 +744,10 @@ export class ZkUnoService {
       hand_hash: Buffer.from(handHash),
       zk_seal: Buffer.from(seal),
     }, { timeoutInSeconds: DEFAULT_TIMEOUT });
-    return sendTx(tx);
+    const result = await sendTx(tx);
+    console.log('  ✅ commit_hand_zk tx result:', result);
+    console.groupEnd();
+    return result;
   }
 
   // ─── Play card ────────────────────────────────────────────────────────────
@@ -674,12 +764,26 @@ export class ZkUnoService {
     activeColour: number,
     p: WalletSigner
   ) {
+    const COLOUR_NAMES = ['Red','Yellow','Green','Blue','Wild'];
+    const VALUE_NAMES  = (v: number) => v <= 9 ? String(v) : ['Skip','Rev','+2','Wild','+4'][v-10] ?? '?';
+
     const oldHandBytes = encodeHand(oldHand);
     const newHandBytes = encodeHand(newHand);
     const oldHash = computeHandHash(oldHandBytes, oldSalt);
     const newHash = computeHandHash(newHandBytes, newSalt);
     const isWinner = newHand.length === 0;
     const isUno    = newHand.length === 1;
+
+    console.group('%c[ZK-UNO] 🎴 playCardZk', 'color:#818cf8;font-weight:bold;font-size:13px');
+    console.log('  session_id    :', sessionId);
+    console.log('  player        :', player);
+    console.log('  played_card   :', `${COLOUR_NAMES[playedCard.colour]} ${VALUE_NAMES(playedCard.value)}`);
+    console.log('  wild_colour   :', COLOUR_NAMES[wildColour] ?? wildColour);
+    console.log('  active_colour :', COLOUR_NAMES[activeColour] ?? activeColour);
+    console.log('  old_hand_hash :', toHex(oldHash));
+    console.log('  new_hand_hash :', toHex(newHash));
+    console.log('  is_winner     :', isWinner, '  is_uno:', isUno);
+    console.log('  old_hand size :', oldHand.length, 'cards →', 'new_hand size:', newHand.length, 'cards');
 
     const proverSeal = await callProver('/prove/move', {
       old_hand: Array.from(oldHandBytes), old_salt: Array.from(oldSalt),
@@ -694,6 +798,9 @@ export class ZkUnoService {
       isWinner, isUno
     );
 
+    console.log('  📦 Final seal (36 bytes):', toHex(seal));
+    console.log('  📡 Submitting play_card_zk transaction...');
+
     const client = this.signingClient(p);
     const tx = await client.play_card_zk({
       session_id: sessionId, player,
@@ -701,7 +808,10 @@ export class ZkUnoService {
       wild_colour: wildColour, new_hand_hash: Buffer.from(newHash),
       zk_seal: Buffer.from(seal), is_winner: isWinner, is_uno: isUno,
     }, { timeoutInSeconds: DEFAULT_TIMEOUT });
-    return sendTx(tx);
+    const result = await sendTx(tx);
+    console.log('  ✅ play_card_zk tx result:', result);
+    console.groupEnd();
+    return result;
   }
 
   // ─── Draw card ────────────────────────────────────────────────────────────
@@ -722,12 +832,27 @@ export class ZkUnoService {
     const oldHash = computeHandHash(oldHandBytes, oldSalt);
     const newHash = computeHandHash(newHandBytes, newSalt);
 
+    const COLOUR_NAMES = ['Red','Yellow','Green','Blue','Wild'];
+    const VALUE_NAMES  = (v: number) => v <= 9 ? String(v) : ['Skip','Rev','+2','Wild','+4'][v-10] ?? '?';
+
+    console.group('%c[ZK-UNO] 🎲 drawCardZk', 'color:#818cf8;font-weight:bold;font-size:13px');
+    console.log('  session_id    :', sessionId);
+    console.log('  player        :', player);
+    console.log('  draw_count    :', drawCount);
+    console.log('  drawn_card    :', `${COLOUR_NAMES[drawnCard.colour]} ${VALUE_NAMES(drawnCard.value)}`);
+    console.log('  old_hand_hash :', toHex(oldHash));
+    console.log('  new_hand_hash :', toHex(newHash));
+    console.log('  old_hand size :', oldHand.length, '→ new_hand size:', newHand.length);
+
     const proverSeal = await callProver('/prove/draw', {
       old_hand: Array.from(oldHandBytes), old_salt: Array.from(oldSalt),
       new_hand: Array.from(newHandBytes), new_salt: Array.from(newSalt),
       session_id: sessionId, draw_count: drawCount,
     });
     const seal = proverSeal ?? await buildDrawSeal(sessionId, oldHash, newHash, drawCount);
+
+    console.log('  📦 Final seal (36 bytes):', toHex(seal));
+    console.log('  📡 Submitting draw_card_zk transaction...');
 
     const client = this.signingClient(p);
     const tx = await client.draw_card_zk({
@@ -736,6 +861,8 @@ export class ZkUnoService {
       zk_seal: Buffer.from(seal),
     }, { timeoutInSeconds: DEFAULT_TIMEOUT });
     const result = await sendTx(tx);
+    console.log('  ✅ draw_card_zk tx result:', result);
+    console.groupEnd();
     return { result, drawnCard, newHand, newHash, newSalt };
   }
 
@@ -751,16 +878,28 @@ export class ZkUnoService {
     const handBytes = encodeHand(hand);
     const handHash  = computeHandHash(handBytes, salt);
 
+    console.group('%c[ZK-UNO] 🔔 declareUnoZk', 'color:#818cf8;font-weight:bold;font-size:13px');
+    console.log('  session_id :', sessionId);
+    console.log('  player     :', player);
+    console.log('  hand_size  :', hand.length, '(must be 1 to declare UNO)');
+    console.log('  hand_hash  :', toHex(handHash));
+
     const proverSeal = await callProver('/prove/uno', {
       hand_bytes: Array.from(handBytes), salt: Array.from(salt),
       session_id: sessionId, hand_hash: Buffer.from(handHash).toString('hex'),
     });
     const seal = proverSeal ?? await buildUnoSeal(sessionId, handHash);
 
+    console.log('  📦 Final seal (36 bytes):', toHex(seal));
+    console.log('  📡 Submitting declare_uno_zk transaction...');
+
     const client = this.signingClient(p);
     const tx = await client.declare_uno_zk({
       session_id: sessionId, player, zk_seal: Buffer.from(seal),
     }, { timeoutInSeconds: DEFAULT_TIMEOUT });
-    return sendTx(tx);
+    const result = await sendTx(tx);
+    console.log('  ✅ declare_uno_zk tx result:', result);
+    console.groupEnd();
+    return result;
   }
 }

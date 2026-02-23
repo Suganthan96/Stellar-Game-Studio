@@ -10,6 +10,8 @@ import {
   randomSalt,
   removeCard,
   canPlay,
+  DRAW_TWO,
+  WILD_DRAW4,
   type Card,
   type Game,
   type WalletSigner,
@@ -26,6 +28,7 @@ export interface GameState {
   isMyTurn: boolean;
   handCommitted: boolean;
   unoDeclaimed: boolean;
+  pendingDraws: number;
   loading: string | null;
   error: string | null;
   commitHand: () => Promise<void>;
@@ -244,7 +247,7 @@ export function useGame(sessionId: number | null, address: string | null, signer
 
   return {
     game, myHand, mySalt, playerIndex, isMyTurn, handCommitted,
-    unoDeclaimed, loading, error,
+    unoDeclaimed, pendingDraws: 0, loading, error,
     commitHand, playCard, drawCard, declareUno,
     clearError: () => setError(null),
   };
