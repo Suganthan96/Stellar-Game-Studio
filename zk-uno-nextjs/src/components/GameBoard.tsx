@@ -280,9 +280,10 @@ export default function GameBoard({ sessionId }: GameBoardProps) {
             const isSelected =
               selectedCard?.colour === card.colour && selectedCard?.value === card.value;
             const imgSrc = getCardImage(card.colour, card.value);
+            // Use index as key — hand array is the source of truth after optimistic removal
             return (
               <button
-                key={`${card.colour}-${card.value}-${index}`}
+                key={index}
                 onClick={() => handCommitted && isMyTurn ? handleCardClick(card) : undefined}
                 disabled={!handCommitted || !isMyTurn}
                 className={`relative transition-all duration-200 disabled:cursor-default ${

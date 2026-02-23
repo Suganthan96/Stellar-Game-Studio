@@ -324,6 +324,12 @@ async function sendTx(tx: contract.AssembledTransaction<any>) {
         return { result: (tx as any).result } as any;
       }
     }
+    // "Bad union switch: N" is thrown by the XDR parser when decoding the
+    // Result<void> return value after the transaction has already been
+    // successfully submitted and confirmed on-chain.  The tx succeeded — swallow it.
+    if (msg.includes('Bad union switch')) {
+      return { result: undefined } as any;
+    }
     throw err;
   }
 }

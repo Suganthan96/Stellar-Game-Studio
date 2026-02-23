@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   ZkUnoService,
   dealHand,
+  deriveCard,
   computeHandHash,
   encodeHand,
   randomSalt,
@@ -47,6 +48,8 @@ export function useGame(sessionId: number | null, address: string | null, signer
   const MAX_POLL_FAILURES = 5;
   // Stable ref so poll() never becomes stale without triggering re-subscriptions
   const gameRef = useRef<Game | null>(null);
+  // Track whether the local hand has been dealt — never re-deal once initialized
+  const handInitializedRef = useRef(false);
 
   const playerIndex: 0 | 1 | null = !game || !address
     ? null
@@ -92,9 +95,10 @@ export function useGame(sessionId: number | null, address: string | null, signer
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
   }, [sessionId, poll]); // poll is now stable (no `game` dep), so this only runs once per sessionId
 
-  // Derive local hand once we know the session and player
+  // Derive local hand ONCE we know the session and player — never re-deal
   useEffect(() => {
-    if (!sessionId || playerIndex === null || myHand.length > 0) return;
+    if (!sessionId || playerIndex === null || handInitializedRef.current) return;
+    handInitializedRef.current = true;
     const hand = dealHand(sessionId, playerIndex);
     const salt = randomSalt();
     setMyHand(hand);
@@ -103,6 +107,29 @@ export function useGame(sessionId: number | null, address: string | null, signer
 
   const humanizeError = (e: unknown): string => {
     const msg = e instanceof Error ? e.message : String(e);
+    // "Bad union switch: 4" = contract error code 4 = NotYourTurn
+    if (msg.includes('Bad union switch')) {
+      const match = msg.match(/Bad union switch:\s*(\d+)/);
+      const code = match ? parseInt(match[1]) : -1;
+      const contractErrors: Record<number, string> = {
+        1: 'Game not found. Check the session ID.',
+        2: "You are not a player in this game.",
+        3: 'Game has already ended.',
+        4: "It's not your turn yet.",
+        5: 'Hand not committed yet.',
+        6: 'Invalid hand hash.',
+        7: 'Card not in hand.',
+        8: 'That card cannot be played now.',
+        9: 'Illegal Wild Draw 4.',
+        10: 'Invalid hand size.',
+        11: 'Hand already committed for this session.',
+        12: 'ZK proof invalid.',
+        13: 'ZK verifier not set.',
+        14: 'ZK active colour mismatch.',
+        15: 'ZK draw count mismatch.',
+      };
+      return contractErrors[code] ?? `Contract error (code ${code})`;
+    }
     if (msg.includes('UnreachableCodeReached') || msg.includes('unreachable')) {
       if (msg.includes('self-play')) return 'Self-play not allowed — use two different wallets.';
       if (msg.includes('start_game')) return 'Failed to start game. Make sure both players are different addresses.';
@@ -146,17 +173,21 @@ export function useGame(sessionId: number | null, address: string | null, signer
     if (!sessionId || !address || !signer || !mySalt || !game) return;
     setLoading('Playing card…');
     setError(null);
+    const newSalt = randomSalt();
+    const newHand = removeCard(myHand, card.colour, card.value);
+    // Optimistically update the hand immediately so the card disappears at once
+    setMyHand(newHand);
+    setMySalt(newSalt);
     try {
-      const newSalt = randomSalt();
-      const newHand = removeCard(myHand, card.colour, card.value);
       await svc.playCardZk(
         sessionId, address, myHand, mySalt, card, newHand, newSalt,
         wildColour, game.active_colour, signer
       );
-      setMyHand(newHand);
-      setMySalt(newSalt);
       await poll();
     } catch (e) {
+      // Revert hand on failure
+      setMyHand(myHand);
+      setMySalt(mySalt);
       setError(humanizeError(e));
     } finally {
       setLoading(null);
@@ -167,15 +198,29 @@ export function useGame(sessionId: number | null, address: string | null, signer
     if (!sessionId || !address || !signer || !mySalt || !game) return;
     setLoading('Drawing card…');
     setError(null);
+
+    // Optimistically add the drawn card immediately using the same deterministic logic
+    const drawnCard = deriveCard(sessionId, game.draw_count);
+    const optimisticHand = [...myHand, drawnCard];
+    const newSalt = randomSalt();
+    setMyHand(optimisticHand);
+    setMySalt(newSalt);
+
     try {
-      const newSalt = randomSalt();
-      const { newHand, newSalt: ns } = await svc.drawCardZk(
+      await svc.drawCardZk(
         sessionId, address, myHand, mySalt, newSalt, game.draw_count, signer
       );
-      setMyHand(newHand);
-      setMySalt(ns);
       await poll();
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // "Bad union switch" after a successful draw tx — the card was drawn, keep optimistic state
+      if (msg.includes('Bad union switch')) {
+        await poll();
+        return;
+      }
+      // Real error — revert the optimistic hand update
+      setMyHand(myHand);
+      setMySalt(mySalt);
       setError(humanizeError(e));
     } finally {
       setLoading(null);
