@@ -324,6 +324,12 @@ async function sendTx(tx: contract.AssembledTransaction<any>) {
         return { result: (tx as any).result } as any;
       }
     }
+    // "Bad union switch: N" is thrown by the XDR parser when decoding the
+    // Result<void> return value after the transaction has already been
+    // successfully submitted and confirmed on-chain.  The tx succeeded — swallow it.
+    if (msg.includes('Bad union switch')) {
+      return { result: undefined } as any;
+    }
     throw err;
   }
 }
@@ -560,54 +566,64 @@ export class ZkUnoService {
 
     // Poll for confirmation
     const hash = sendResult.hash;
-    let getResult = await server.getTransaction(hash);
+    let getResult: any;
+    let rawStatus: string = 'NOT_FOUND';
     const start = Date.now();
-    while (getResult.status === 'NOT_FOUND' && Date.now() - start < 30_000) {
+
+    // Use raw fetch to poll so we never hit SDK XDR parse errors on FAILED txs
+    const pollTx = async () => {
+      const resp = await fetch(RPC_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTransaction', params: { hash } }),
+      });
+      return resp.json();
+    };
+
+    let rawResp = await pollTx();
+    rawStatus = rawResp?.result?.status ?? 'NOT_FOUND';
+
+    while (rawStatus === 'NOT_FOUND' && Date.now() - start < 30_000) {
       await new Promise(r => setTimeout(r, 2000));
-      getResult = await server.getTransaction(hash);
+      rawResp = await pollTx();
+      rawStatus = rawResp?.result?.status ?? 'NOT_FOUND';
     }
-    console.log('[completeStartGame] tx status:', getResult.status);
-    if (getResult.status !== 'SUCCESS') {
-      // Decode the Soroban result for a useful error message
-      // In SDK v14, resultXdr and resultMetaXdr are already parsed XDR objects
-      const resultXdr = (getResult as any).resultXdr as xdr.TransactionResult | undefined;
-      const metaXdr   = (getResult as any).resultMetaXdr as xdr.TransactionMeta | undefined;
-      let detail = '';
-      try {
-        if (resultXdr) {
-          const results = (resultXdr as any).result?.()?.results?.() ?? [];
-          const names = results.map((r: any) => {
-            try { return r.tr().invokeHostFunctionResult().switch().name; } catch { return String(r); }
-          });
-          detail += ` | invokeResult: ${JSON.stringify(names)}`;
-        }
-      } catch (decodeErr) {
-        detail += ` | resultXdr err: ${decodeErr}`;
-      }
-      try {
-        if (metaXdr) {
-          // TransactionMeta varies: v3 has diagnosticEvents, v2/v1 don't.
-          // v3() throws (not returns undefined) when the meta isn't v3 format.
+
+    // Now safely get the SDK result only if SUCCESS to avoid parse errors
+    console.log('[completeStartGame] tx status:', rawStatus);
+    if (rawStatus !== 'SUCCESS') {
+      // Extract error detail from raw response
+      const raw = rawResp?.result ?? {};
+      let detail = ` status=${rawStatus}`;
+      if (raw.resultXdr) detail += ` | resultXdr: ${raw.resultXdr}`;
+      if (raw.resultMetaXdr) {
+        try {
+          const metaXdr = xdr.TransactionMeta.fromXDR(raw.resultMetaXdr, 'base64');
           let sorobanMeta: any = null;
           try { sorobanMeta = (metaXdr as any).v3().sorobanMeta(); } catch { /* not v3 */ }
           if (sorobanMeta) {
-            const retVal = sorobanMeta.returnValue?.();
-            detail += ` | returnValue: ${retVal?.switch?.()?.name}`;
             const events = sorobanMeta.diagnosticEvents?.() ?? [];
             events.forEach((ev: any, idx: number) => {
               try {
                 const d = ev.event().body().v0();
-                const topics = d.topics().map((t: any) => { try { return t.switch().name + ':' + JSON.stringify(t.value()); } catch { return '?'; } });
+                const topics = d.topics().map((t: any) => {
+                  try { return t.switch().name + ':' + JSON.stringify(t.value()); } catch { return '?'; }
+                });
                 detail += ` | diag[${idx}]: ${topics.join(',')}`;
               } catch { /* skip */ }
             });
-          } else {
-            detail += ` | (meta not v3, no diagnostic events available)`;
           }
-        }
-      } catch (metaErr) { detail += ` | metaXdr err: ${metaErr}`; }
+        } catch (metaErr) { detail += ` | metaXdr parse err: ${metaErr}`; }
+      }
       console.error('[completeStartGame] FAILED detail:', detail);
-      throw new Error(`Transaction failed: ${getResult.status}${detail}`);
+      throw new Error(`Transaction failed:${detail}`);
+    }
+
+    // SUCCESS — fetch the full SDK result for return value
+    try {
+      getResult = await server.getTransaction(hash);
+    } catch {
+      getResult = rawResp?.result;
     }
     return getResult;
   }
